@@ -6,6 +6,7 @@ import optax
 import flax.nnx as nnx
 import distrax
 import math
+from tqdm import tqdm
 
 class Critic(nnx.Module):
     # critic takes state and return value
@@ -41,9 +42,24 @@ class Actor(nnx.Module):
         action_distribution = distrax.Normal(loc=mean, scale=std_dev) 
         action, log_prob = action_distribution.sample_and_log_prob(seed=key)
         return action, jnp.sum(log_prob, axis=-1)
+    
+class ModelState(nnx.Object):
+    def __init__(self, actor_GD, actor_params, actor_state, critic_GD, critic_params, critic_state):
+        self.actor_GD = actor_GD
+        self.actor_params = actor_params
+        self.actor_state = actor_state
+        self.critic_GD = critic_GD
+        self.critic_params = critic_params
+        self.critic_state = critic_state
+
+def policy_rollout():
+    pass
 
 def compute_advantages():
     pass
+
+def getImportanceRatio():
+    return importance_ratio
 
 def surrogate_obj(advantage, importance_ratio, Value_pred, Value_target, action_dist_std_dev,*, epsilon, C1, C2):
     L_clip = jnp.min(jnp.array([
@@ -62,53 +78,101 @@ def surrogate_optimisation_step(actor_GD, actor_params, actor_state, critic_GD, 
     def surrogate_obj_call():
         return 0 
 
-env_id = 'LunarLander-V3'
-env = gym.make(env_id)
+def main():
+    env_id = 'LunarLander-V3'
+    env = gym.make(env_id)
 
-seed = 43
-hs_c = 16
-hs_a = 16
-Learn_Rate_c = 0.001
-beta_1_c = 0.999
-beta_2_c = 0.9
-Learn_Rate_a = 0.001
-beta_1_a = 0.999
-beta_2_a = 0.9
+    seed = 43
+    iterations = 500
+    epochs = 100
+    T = 50
+    N = 1
+    hs_c = 16
+    hs_a = 16
+    Learn_Rate_c = 0.001
+    beta_1_c = 0.999
+    beta_2_c = 0.9
+    Learn_Rate_a = 0.001
+    beta_1_a = 0.999
+    beta_2_a = 0.9
 
-state_size = 8
-action_space_size = 4
+    state_size = 8
+    action_space_size = 4
 
-base_key = jax.random.PRNGKey(seed)
-rngs = nnx.Rngs(base_key)
+    base_key = jax.random.PRNGKey(seed)
+    rngs = nnx.Rngs(base_key)
 
-critic = Critic(
-    state_size, 
-    hs_c, 
-    rngs
-)
+    critic = Critic(
+        state_size, 
+        hs_c, 
+        rngs
+    )
 
-actor = Actor(
-    state_size, 
-    hs_a, 
-    action_space_size, 
-    rngs
-)
+    actor = Actor(
+        state_size, 
+        hs_a, 
+        action_space_size, 
+        rngs
+    )
 
-optimiser_critic = optax.adam(
-    learning_rate=Learn_Rate_c, 
-    b1=beta_1_c, 
-    b2=beta_2_c
-)
+    optimiser_critic = optax.adam(
+        learning_rate=Learn_Rate_c, 
+        b1=beta_1_c, 
+        b2=beta_2_c
+    )
 
-optimiser_actor = optax.adam(
-    learning_rate=Learn_Rate_a, 
-    b1=beta_1_a, 
-    b2=beta_2_a
-)
+    optimiser_actor = optax.adam(
+        learning_rate=Learn_Rate_a, 
+        b1=beta_1_a, 
+        b2=beta_2_a
+    )
 
-graph_defCritic, paramsCritic, stateCritic = nnx.split(critic, nnx.Param, nnx.State)
-graph_defActor, paramsActor, stateActor = nnx.split(critic, nnx.Param, nnx.State)
+    graph_defCritic, paramsCritic, stateCritic = nnx.split(critic, nnx.Param, nnx.State)
+    graph_defActor, paramsActor, stateActor = nnx.split(critic, nnx.Param, nnx.State)
 
-opt_stateActor = optimiser_actor.init(paramsActor)
-opt_stateCritic = optimiser_critic.init(paramsCritic)
+    opt_stateActor = optimiser_actor.init(paramsActor)
+    opt_stateCritic = optimiser_critic.init(paramsCritic)
+
+    current_state = ModelState(
+        graph_defCritic, 
+        paramsCritic, 
+        stateCritic, 
+        graph_defActor, 
+        paramsActor, 
+        stateActor, 
+    )
+
+    old_state = ModelState(
+        graph_defCritic, 
+        paramsCritic, 
+        stateCritic, 
+        graph_defActor, 
+        paramsActor, 
+        stateActor, 
+    )
+
+    for iteration in range(iterations):
+        rollout_data = policy_rollout()
+        advantages = compute_advantages()
+        data_batches = batch_data()
+        for epoch in range(epochs):
+            for batch in tqdm(data_batches, desc=f'epoch {epoch}/{epochs} in iteration {iteration}/{iterations}', leave=False):
+                importance_ratio = getImportanceRatio()
+                new_params_Critic, new_paramsActor, new_stateCritic, new_stateActor, new_opt_stateActor, new_opt_stateCritic = surrogate_optimisation_step()
+                current_state.actor_params = new_paramsActor
+                current_state.actor_state = new_stateActor
+                current_state.critic_params = new_params_Critic
+                current_state.critic_state = new_stateCritic
+                opt_stateActor = new_opt_stateActor
+                opt_stateCritic = new_opt_stateCritic
+
+        old_state.actor_params = current_state.actor_params 
+        old_state.actor_state = current_state.actor_state
+        old_state.critic_params = current_state.critic_params
+        old_state.critic_state = current_state.critic_state
+
+if __name__ == "__main__":
+    print("Running Training...")
+    main()
+    print("Training Complete")
 
