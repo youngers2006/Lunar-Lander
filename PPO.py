@@ -1,12 +1,44 @@
 import gymnasium as gym
 import jax 
 import jax.numpy as jnp
+import numpy as np
+from jax.experimental import host_callback as hcb
 import jax.nn as nn
 import optax
 import flax.nnx as nnx
 import distrax
 import math
 from tqdm import tqdm
+
+class JaxGymWrapper:
+    def __init__(self, env_name, **kwargs):
+        self._env = gym.make(env_name, **kwargs)
+        self._step_result_shape = (
+            jax.ShapeDtypeStruct(self._env.observation_space.shape, self._env.observation_space.dtype),
+            jax.ShapeDtypeStruct((), np.float32),
+            jax.ShapeDtypeStruct((), np.bool_),
+            jax.ShapeDtypeStruct((), np.bool_)
+        )
+        self._reset_result_shape = jax.ShapeDtypeStruct(
+            self._env.observation_space.shape, self._env.observation_space.dtype
+        )
+
+    def _host_step(self, action):
+        obs, reward, terminated, truncated, info = self._env.step(np.asarray(action))
+        return obs, reward, terminated, truncated
+
+    def _host_reset(self):
+        obs, info = self._env.reset()
+        return obs
+    
+    def step(self, action):
+        return hcb.call(self._host_step, action, result_shape=self._step_result_shape)
+
+    def reset(self):
+        return hcb.call(self._host_reset, (), result_shape=self._reset_result_shape)
+    
+    def close(self):
+        self._env.close()
 
 class Critic(nnx.Module):
     # critic takes state and return value
@@ -52,11 +84,14 @@ class ModelState(nnx.Object):
         self.critic_params = critic_params
         self.critic_state = critic_state
 
-def policy_rollout():
-    pass
+def policy_rollout(T):
+    env.reset(seed)
+    for t in T:
+
+    return data_dict
 
 def compute_advantages():
-    pass
+    return advantages
 
 def getImportanceRatio():
     return importance_ratio
@@ -77,10 +112,30 @@ def surrogate_optimisation_step(actor_GD, actor_params, actor_state, critic_GD, 
 
     def surrogate_obj_call():
         return 0 
+    
+    return new_params_Critic, new_paramsActor, new_stateCritic, new_stateActor, new_opt_stateActor, new_opt_stateCritic
 
 def main():
+
+    @jax.jit
+    def policy_rollout(T, seed, ):
+        state, info = jax_env.step(seed)
+        terminated = False
+        truncated = False
+        for t in T:
+            action = 
+            state_, reward, terminated, truncated, info = jax_env(action)
+
+            state = state_
+        
+            if terminated:
+                seed += 1
+                state, info = jax_env_reset(seed)
+
+        return data_dict
+
     env_id = 'LunarLander-V3'
-    env = gym.make(env_id)
+    jax_env = JaxGymWrapper(env_id, continuous=True)
 
     seed = 43
     iterations = 500
