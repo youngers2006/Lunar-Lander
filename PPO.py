@@ -30,24 +30,22 @@ class DataSet:
         self.t += 1
 
     def compute_advantage_and_returns(self, critic, lambda_, gamma):
-        adv_ = 0
         with torch.no_grad():
             value_ = critic.forward(self.state[self.t]) * (1 - self.dones[self.t])
-            R = critic.forward(self.state[self.t])
+            R = value_
+            adv_ = 0
 
         for i in reversed(range(self.t)):
-            if self.dones[i]:
-                value_ = 0
-                R = 0
-                TD_error = self.reward[i] + gamma * value_ - self.values[i]
-                adv = TD_error
-            else:
-                TD_error = self.reward[i] + gamma * value_ - self.values[i]
-                adv = TD_error + gamma * lambda_ * adv_ 
+            mask = 1.0 - self.dones[i]
+
+            TD_error = self.rewards[i] + gamma * value_ * mask - self.values[i]
+            adv = TD_error + gamma * lambda_ * adv_
+            self.advantages[i] = adv
             adv_ = adv
-            R = self.rewards[i] 
             value_ = self.values[i]
-            return_ = self.rewards[i] + gamma * R
+
+            R = self.rewards[i] + gamma * R * mask
+            self.returns[i] = R
 
 
     def get_minibatches(self, batch_size):
@@ -161,7 +159,7 @@ def main():
         device = 'cpu'
         print("cpu selected as device")
 
-    env_id = 'LunarLander-V3'
+    env_id = 'LunarLander'
     env = gym.make(env_id, continuous=True)
 
     seed = 43
@@ -170,9 +168,9 @@ def main():
     T = 600
     N = 1
     hs_c1 = 16
-    hs_c2 = 16
+    hs_c2 = 8
     hs_a1 = 16
-    hs_a2 = 16
+    hs_a2 = 8
 
     Learn_Rate_c = 0.001
     beta_1_c = 0.999
@@ -218,7 +216,7 @@ def main():
         device
     )
 
-    for iteration in range(iterations):
+    for _ in range(iterations):
         policy_rollout(
             env, 
             actor, 
@@ -230,7 +228,7 @@ def main():
             lambda_,
             gamma
         )
-        for epoch in range(epochs):
+        for _ in range(epochs):
             ppo_update(
                 actor,
                 critic,
