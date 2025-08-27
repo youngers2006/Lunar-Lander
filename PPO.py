@@ -26,26 +26,30 @@ class DataSet:
         self.rewards[self.t] = reward
         self.dones[self.t] = done
         self.log_probs[self.t] = log_prob
-        self.values[self.t] = pred_value
+        self.pred_values[self.t] = pred_value
         self.t += 1
 
     def compute_advantage_and_returns(self, critic, lambda_, gamma):
-        with torch.no_grad():
-            value_ = critic.forward(self.state[self.t]) * (1 - self.dones[self.t])
-            R = value_
-            adv_ = 0
+        if self.t == 0:
+            return
 
+        with torch.no_grad():
+            last_idx = self.t - 1
+            last_done = self.dones[last_idx]  # 1.0 if terminal else 0.0
+            last_state = self.states[last_idx].unsqueeze(0)  # shape [1, state_dim]
+            last_value = critic(last_state).detach() * (1.0 - last_done)
+            next_value = last_value
+            R = last_value
+
+        adv = 0.0
         for i in reversed(range(self.t)):
             mask = 1.0 - self.dones[i]
-
-            TD_error = self.rewards[i] + gamma * value_ * mask - self.values[i]
-            adv = TD_error + gamma * lambda_ * adv_
+            delta = self.rewards[i] + gamma * next_value * mask - self.pred_values[i]
+            adv = delta + gamma * lambda_ * mask * adv
             self.advantages[i] = adv
-            adv_ = adv
-            value_ = self.values[i]
-
             R = self.rewards[i] + gamma * R * mask
             self.returns[i] = R
+            next_value = self.pred_values[i]
 
 
     def get_minibatches(self, batch_size):
@@ -68,33 +72,36 @@ class DataSet:
 
 class Critic(nn.Module):
     def __init__(self, state_size, hidden_size_1, hidden_size_2):
-        super.__init__()
+        super().__init__()
         self.L1 = nn.Linear(state_size, hidden_size_1)
         self.L2 = nn.Linear(hidden_size_1, hidden_size_2)
         self.L3 = nn.Linear(hidden_size_2, 1)
-    
+        self.relu = nn.ReLU()
+
     def forward(self, x):
         x = self.L1(x)
-        x = nn.ReLU(x)
+        x = self.relu(x)
         x = self.L2(x)
-        x = nn.ReLU(x)
+        x = self.relu(x)
         return self.L3(x)
 
 class Actor(nn.Module):
     def __init__(self, state_size, hidden_size_1, hidden_size_2, action_space_size):
-        super.init()
+        super().__init__()
         self.L1 = nn.Linear(state_size, hidden_size_1)
         self.L2 = nn.Linear(hidden_size_1, hidden_size_2)
         self.mu = nn.Linear(hidden_size_2, action_space_size)
         self.log_std = nn.Linear(hidden_size_2, action_space_size)
+        self.relu = nn.ReLU()
 
     def forward(self, x):
         x = self.L1(x)
-        x = nn.ReLU(x)
+        x = self.relu(x)
         x = self.L2(x)
-        x = nn.ReLU(x)
+        x = self.relu(x)
         mean = self.mu(x)
-        std_dev = torch.exp(self.log_std(x))
+        log_std = torch.clamp(self.log_std(x), min=-20, max=2)
+        std_dev = torch.exp(log_std)
         return mean, std_dev
     
     def get_dist(self, state):
@@ -111,13 +118,14 @@ def ppo_update(actor, critic, dataset, actor_optimizer, critic_optimizer, batch_
     for states, actions, returns, advantages, old_log_probs, values in dataset.get_minibatches(batch_size):
 
         dist = actor.get_dist(states)
-        new_log_probs = dist.log_prob(actions).sum(dims=-1, keepdim=True)
+        new_log_probs = dist.log_prob(actions).sum(dim=-1, keepdim=True)
         ratios = (new_log_probs - old_log_probs).exp()
 
         surrogate1 = ratios * advantages
         surrogate2 = torch.clamp(ratios, 1 - clip_eps, 1 + clip_eps) * advantages
         actor_loss = -torch.min(surrogate1, surrogate2).mean()
-        actor_loss = actor_loss - BETA 
+        entropy = dist.entropy().sum(dim=-1, keepdim=True).mean()
+        actor_loss = actor_loss - BETA * entropy.mean()
 
         value_loss = (critic(states) - returns).pow(2).mean()
 
@@ -129,26 +137,28 @@ def ppo_update(actor, critic, dataset, actor_optimizer, critic_optimizer, batch_
         value_loss.backward()
         critic_optimizer.step()
 
-def policy_rollout(env, actor, critic, dataset, seed):
-        state, _ = env.reset(seed)
+def policy_rollout(env, actor, critic, dataset, seed, device):
+        state, _ = env.reset(seed=seed)
         done = False
         for t in range(dataset.T):
-            action, log_prob = actor.act(state)
-            state_, reward, terminated, truncated, _ = env.step(action)
+            state_tensor = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
+            action, log_prob = actor.act(state_tensor)
+            action_np = action.detach().cpu().numpy().flatten()
+            state_, reward, terminated, truncated, _ = env.step(action_np)
             done = (terminated or truncated)
-            value = critic(state)
+            value = critic(state_tensor)
             dataset.add(
-                state,
-                action,
-                reward,
-                value,
-                done,
-                log_prob
+                torch.tensor(state, dtype=torch.float32, device=device),
+                action.squeeze(0),
+                torch.tensor([reward], dtype=torch.float32, device=device),
+                value.detach(),
+                torch.tensor([done], dtype=torch.float32, device=device),
+                log_prob.detach()
             )
             state = state_
             if done:
                 seed += 1
-                state, _ = env.reset(seed)
+                state, _ = env.reset(seed=seed)
                 done = False
 
 def main():
@@ -159,29 +169,30 @@ def main():
         device = 'cpu'
         print("cpu selected as device")
 
-    env_id = 'LunarLander'
-    env = gym.make(env_id, continuous=True)
+    env_id = 'LunarLanderContinuous-v3'
+    env = gym.make(env_id)
 
     seed = 43
     iterations = 500
-    epochs = 20
-    T = 600
+    epochs = 10
+    T = 2048
     N = 1
     hs_c1 = 16
     hs_c2 = 8
     hs_a1 = 16
     hs_a2 = 8
 
-    Learn_Rate_c = 0.001
+    Learn_Rate_c = 0.0001
     beta_1_c = 0.999
     beta_2_c = 0.9
-    Learn_Rate_a = 0.001
+    Learn_Rate_a = 0.0001
     beta_1_a = 0.999
     beta_2_a = 0.9
     gamma = 0.999
     lambda_ = 0.8
     epsilon = 0.2
     batch_size = 50
+    BETA = 0.01
 
     state_size = 8
     action_space_size = 4
@@ -190,13 +201,13 @@ def main():
         state_size, 
         hs_c1,
         hs_c2
-    )
+    ).to(device)
     actor = Actor(
         state_size, 
         hs_a1, 
         hs_a2,
         action_space_size
-    )
+    ).to(device)
 
     optimiser_actor = torch.optim.Adam(
         actor.parameters(), 
@@ -216,15 +227,18 @@ def main():
         device
     )
 
-    for _ in range(iterations):
+    for iteration in tqdm(range(iterations), leave=True):
+        dataset.reset()
         policy_rollout(
             env, 
             actor, 
             critic, 
             dataset, 
-            seed
+            seed,
+            device
         )
         dataset.compute_advantage_and_returns(
+            critic,
             lambda_,
             gamma
         )
@@ -236,6 +250,7 @@ def main():
                 optimiser_actor,
                 optimiser_critic,
                 batch_size,
+                BETA,
                 epsilon
             )
                 
