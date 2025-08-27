@@ -6,8 +6,58 @@ import numpy as np
 import math
 from tqdm import tqdm
 
+class DataSet:
+    def __init__(self, state_dim, action_dim, T, device):
+        self.states = torch.zeros(size=(T, state_dim), dtype=torch.float32, device=device)
+        self.actions = torch.zeros(size=(T, action_dim), dtype=torch.float32, device=device)
+        self.rewards = torch.zeros(size=(T, 1), dtype=torch.float32, device=device)
+        self.pred_values = torch.zeros(size=(T, 1), dtype=torch.float32, device=device)
+        self.dones = torch.zeros(size=(T, 1), dtype=torch.float32, device=device)
+        self.log_probs = torch.zeros(size=(T, 1), dtype=torch.float32, device=device)
+        self.t = 0
+        self.T = T
+
+        self.advantages = torch.zeros((T, 1), dtype=torch.float32, device=device)
+        self.returns = torch.zeros((T, 1), dtype=torch.float32, device=device)
+    
+    def add(self, state, action, reward, pred_value, done, log_prob):
+        self.states[self.t] = torch.tensor(state, dtype=torch.float32, device=self.states.device)
+        self.actions[self.t] = torch.tensor(action, dtype=torch.float32, device=self.actions.device)
+        self.rewards[self.t] = reward
+        self.dones[self.t] = done
+        self.log_probs[self.t] = log_prob
+        self.values[self.t] = pred_value
+        self.t += 1
+
+    def compute_advantage_and_returns(self, lambda_, gamma):
+        adv = 0
+        for i in reversed(range(self.t)):
+            mask = 1.0 - self.dones[i]
+            delta = self.rewards[i] + gamma * last_value * mask - self.pred_values[i]
+            adv = delta + gamma * lambda_ * mask * adv
+            self.advantages[i] = adv
+            last_value = self.pred_values[i]
+        self.returns[:self.t] = self.advantages[:self.t] + self.values[:self.t]
+
+    def get_minibatches(self, batch_size):
+        idxs = np.arange(self.t)
+        np.random.shuffle(idxs)
+        for start in range(0, self.t, batch_size):
+            end = start + batch_size
+            batch_idx = idxs[start:end]
+            yield (
+                self.states[batch_idx],
+                self.actions[batch_idx],
+                self.returns[batch_idx],
+                self.advantages[batch_idx],
+                self.log_probs[batch_idx]
+            )
+
+    def reset(self):
+        self.t = 0
+
+
 class Critic(nn.Module):
-    # critic takes state and return value
     def __init__(self, state_size, hidden_size, rngs):
         super.__init__()
         self.L1 = nn.Linear(state_size, hidden_size, rngs)
@@ -39,17 +89,9 @@ class Actor(nn.Module):
     def act(self, state, key):
         mean, std_dev = self.forward(state)
         action_distribution = torch.distributions.Normal(loc=mean, scale=std_dev) 
-        action, log_prob = action_distribution.sample_and_log_prob(seed=key)
-        return action, jnp.sum(log_prob, axis=-1)
-    
-class ModelState(nnx.Object):
-    def __init__(self, actor_GD, actor_params, actor_state, critic_GD, critic_params, critic_state):
-        self.actor_GD = actor_GD
-        self.actor_params = actor_params
-        self.actor_state = actor_state
-        self.critic_GD = critic_GD
-        self.critic_params = critic_params
-        self.critic_state = critic_state
+        action = action_distribution.rsample()
+        log_prob = action_distribution.log_prob(action).sum(dim=-1, keepdim=True)
+        return action, log_prob
 
 def compute_advantages():
     return advantages
@@ -68,7 +110,6 @@ def surrogate_obj(advantage, importance_ratio, Value_pred, Value_target, action_
     entropy = 0.5 * (jnp.log(2 * math.pi * (action_dist_std_dev ** 2) + 1))
     return L_clip - C1 * L_vf + C2 * entropy 
 
-@jax.jit
 def surrogate_optimisation_step(actor_GD, actor_params, actor_state, critic_GD, critic_params, critic_state, opt_state_actor, opt_state_critic):
 
     def surrogate_obj_call():
@@ -115,9 +156,6 @@ def main():
 
     state_size = 8
     action_space_size = 4
-
-    base_key = jax.random.PRNGKey(seed)
-    rngs = nnx.Rngs(base_key)
 
     critic = Critic(
         state_size, 
