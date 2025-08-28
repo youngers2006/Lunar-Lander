@@ -86,7 +86,7 @@ class Critic(nn.Module):
         return self.L3(x)
 
 class Actor(nn.Module):
-    def __init__(self, state_size, hidden_size_1, hidden_size_2, action_space_size, action_low, action_high):
+    def __init__(self, state_size, hidden_size_1, hidden_size_2, action_space_size, action_low, action_high, device):
         super().__init__()
         self.L1 = nn.Linear(state_size, hidden_size_1)
         self.L2 = nn.Linear(hidden_size_1, hidden_size_2)
@@ -94,8 +94,8 @@ class Actor(nn.Module):
         self.log_std = nn.Linear(hidden_size_2, action_space_size)
         self.relu = nn.ReLU()
         self.tanh = nn.Tanh()
-        self.action_low = torch.tensor(action_low, dtype=torch.float32)
-        self.action_high = torch.tensor(action_high, dtype=torch.float32)
+        self.action_low = torch.tensor(action_low, dtype=torch.float32, device=device)
+        self.action_high = torch.tensor(action_high, dtype=torch.float32, device=device)
 
     def forward(self, x):
         x = self.L1(x)
@@ -201,8 +201,8 @@ def main():
     batch_size = 50
     BETA = 0.01
 
-    state_size = 8
-    action_space_size = 4
+    state_size = env.observation_space.shape[0]
+    action_space_size = env.action_space.shape[0]
 
     critic = Critic(
         state_size, 
@@ -218,7 +218,9 @@ def main():
         hs_a1, 
         hs_a2,
         action_space_size,
-        (action_low, action_high)
+        action_low, 
+        action_high,
+        device
     ).to(device)
 
     optimiser_actor = torch.optim.Adam(
