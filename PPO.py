@@ -86,20 +86,23 @@ class Critic(nn.Module):
         return self.L3(x)
 
 class Actor(nn.Module):
-    def __init__(self, state_size, hidden_size_1, hidden_size_2, action_space_size):
+    def __init__(self, state_size, hidden_size_1, hidden_size_2, action_space_size, action_low, action_high):
         super().__init__()
         self.L1 = nn.Linear(state_size, hidden_size_1)
         self.L2 = nn.Linear(hidden_size_1, hidden_size_2)
         self.mu = nn.Linear(hidden_size_2, action_space_size)
         self.log_std = nn.Linear(hidden_size_2, action_space_size)
         self.relu = nn.ReLU()
+        self.tanh = nn.Tanh()
+        self.action_low = torch.tensor(action_low, dtype=torch.float32)
+        self.action_high = torch.tensor(action_high, dtype=torch.float32)
 
     def forward(self, x):
         x = self.L1(x)
         x = self.relu(x)
         x = self.L2(x)
         x = self.relu(x)
-        mean = self.mu(x)
+        mean = self.tanh(self.mu(x))
         log_std = torch.clamp(self.log_std(x), min=-20, max=2)
         std_dev = torch.exp(log_std)
         return mean, std_dev
@@ -112,7 +115,11 @@ class Actor(nn.Module):
         action_distribution = self.get_dist(state)
         action = action_distribution.rsample()
         log_prob = action_distribution.log_prob(action).sum(dim=-1, keepdim=True)
+        action = self.scale_action(action)
         return action, log_prob
+    
+    def scale_action(self, action):
+        return self.action_low + (action + 1.0) * 0.5 * (self.action_high - self.action_low)
 
 def ppo_update(actor, critic, dataset, actor_optimizer, critic_optimizer, batch_size, BETA, clip_eps=0.2):
     for states, actions, returns, advantages, old_log_probs, values in dataset.get_minibatches(batch_size):
@@ -175,7 +182,7 @@ def main():
     seed = 43
     iterations = 500
     epochs = 10
-    T = 2048
+    T = 1000
     N = 1
     hs_c1 = 16
     hs_c2 = 8
@@ -185,7 +192,7 @@ def main():
     Learn_Rate_c = 0.0001
     beta_1_c = 0.999
     beta_2_c = 0.9
-    Learn_Rate_a = 0.0001
+    Learn_Rate_a = 0.00001
     beta_1_a = 0.999
     beta_2_a = 0.9
     gamma = 0.999
@@ -202,11 +209,16 @@ def main():
         hs_c1,
         hs_c2
     ).to(device)
+
+    action_low = env.action_space.low
+    action_high = env.action_space.high
+
     actor = Actor(
         state_size, 
         hs_a1, 
         hs_a2,
-        action_space_size
+        action_space_size,
+        (action_low, action_high)
     ).to(device)
 
     optimiser_actor = torch.optim.Adam(
