@@ -176,20 +176,22 @@ def policy_rollout(env, actor, critic, dataset, seed, device):
                 state, _ = env.reset(seed=seed)
                 done = False
 
-def test_policy(env, actor, tests, seed):
+def test_policy(env, actor, tests, seed, device):
     reward_tests = np.empty(shape=(tests,1), dtype=np.float32)
     for test in range(tests):
         state, _ = env.reset(seed=seed)
         reward_total = 0
         done = False
         while not done:
-            action, _ = actor.act(state)
-            state_, reward, terminated, truncated, _ = env.step(action)
+            state_tensor = torch.tensor(state, dtype=torch.float32, device=device)
+            action, _ = actor.act(state_tensor)
+            action_np = action.detach().cpu().numpy()
+            state_, reward, terminated, truncated, _ = env.step(action_np)
             reward_total += reward
             state = state_
             done = (terminated or truncated)
         reward_tests[test] = reward_total
-    return reward_tests
+    return reward_tests.mean()
 
 def main():
     if torch.cuda.is_available():
@@ -210,7 +212,7 @@ def main():
     hs_c1 = 16 ; hs_c2 = 8
     hs_a1 = 16 ; hs_a2 = 8
 
-    Learn_Rate_c = 0.0001 ; Learn_Rate_a = 0.0001
+    Learn_Rate_c = 0.0001 ; Learn_Rate_a = 0.00001
     beta_1_c = 0.999 ; beta_2_c = 0.9
     beta_1_a = 0.999 ; beta_2_a = 0.9
     gamma = 0.999
@@ -263,6 +265,7 @@ def main():
     critic_loss_iter = np.empty(shape=(iterations,1), dtype=np.float32)
 
     env_test = gym.make(env_id, render_mode='human')
+    rewards_iter = np.empty(shape=(iterations,1), dtype=np.float32)
     
     for iteration in tqdm(range(iterations), leave=True):
         actor_loss_epochs = np.empty(shape=(epochs,1), dtype=np.float32)
@@ -297,16 +300,26 @@ def main():
         
         actor_loss_iter[iteration] = actor_loss_epochs.mean()
         critic_loss_iter[iteration] = critic_loss_epochs.mean()
-        rewards_tests = test_policy(
+        rewards_test = test_policy(
+            env, 
+            actor,
+            tests=10,
+            seed=seed,
+            device=device
+        )
+        rewards_iter[iteration] = rewards_test
+    plt.plot(rewards_iter)
+    #plt.plot(actor_loss_iter)
+    #plt.plot(critic_loss_iter)
+    plt.show()
+
+    _ = test_policy(
             env_test, 
             actor,
             tests=10,
-            seed=seed
+            seed=seed,
+            device=device
         )
-
-    plt.plot(actor_loss_iter)
-    plt.plot(critic_loss_iter)
-    plt.show()
 
    
 if __name__ == "__main__":
