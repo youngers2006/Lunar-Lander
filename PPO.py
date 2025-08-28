@@ -5,6 +5,7 @@ import torch.optim as optim
 import numpy as np
 import math
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 
 class DataSet:
     def __init__(self, state_dim, action_dim, T, device):
@@ -35,8 +36,8 @@ class DataSet:
 
         with torch.no_grad():
             last_idx = self.t - 1
-            last_done = self.dones[last_idx]  # 1.0 if terminal else 0.0
-            last_state = self.states[last_idx].unsqueeze(0)  # shape [1, state_dim]
+            last_done = self.dones[last_idx]  
+            last_state = self.states[last_idx].unsqueeze(0)  
             last_value = critic(last_state).detach() * (1.0 - last_done)
             next_value = last_value
             R = last_value
@@ -122,6 +123,8 @@ class Actor(nn.Module):
         return self.action_low + (action + 1.0) * 0.5 * (self.action_high - self.action_low)
 
 def ppo_update(actor, critic, dataset, actor_optimizer, critic_optimizer, batch_size, BETA, clip_eps=0.2):
+    actor_loss_total = 0
+    value_loss_total = 0
     for states, actions, returns, advantages, old_log_probs, values in dataset.get_minibatches(batch_size):
 
         dist = actor.get_dist(states)
@@ -143,6 +146,11 @@ def ppo_update(actor, critic, dataset, actor_optimizer, critic_optimizer, batch_
         critic_optimizer.zero_grad()
         value_loss.backward()
         critic_optimizer.step()
+
+        actor_loss_total += actor_loss
+        value_loss_total += value_loss
+
+    return actor_loss_total, value_loss_total
 
 def policy_rollout(env, actor, critic, dataset, seed, device):
         state, _ = env.reset(seed=seed)
@@ -184,17 +192,12 @@ def main():
     epochs = 10
     T = 1000
     N = 1
-    hs_c1 = 16
-    hs_c2 = 8
-    hs_a1 = 16
-    hs_a2 = 8
+    hs_c1 = 16 ; hs_c2 = 8
+    hs_a1 = 16 ; hs_a2 = 8
 
-    Learn_Rate_c = 0.0001
-    beta_1_c = 0.999
-    beta_2_c = 0.9
-    Learn_Rate_a = 0.00001
-    beta_1_a = 0.999
-    beta_2_a = 0.9
+    Learn_Rate_c = 0.0001 ; Learn_Rate_a = 0.00001
+    beta_1_c = 0.999 ; beta_2_c = 0.9
+    beta_1_a = 0.999 ; beta_2_a = 0.9
     gamma = 0.999
     lambda_ = 0.8
     epsilon = 0.2
@@ -241,7 +244,12 @@ def main():
         device
     )
 
+    actor_loss_iter = np.empty(shape=(iterations,1), dtype=np.float32)
+    critic_loss_iter = np.empty(shape=(iterations,1), dtype=np.float32)
+    
     for iteration in tqdm(range(iterations), leave=True):
+        actor_loss_epochs = np.empty(shape=(epochs,1), dtype=np.float32)
+        critic_loss_epochs = np.empty(shape=(epochs,1), dtype=np.float32)
         dataset.reset()
         policy_rollout(
             env, 
@@ -256,8 +264,8 @@ def main():
             lambda_,
             gamma
         )
-        for _ in range(epochs):
-            ppo_update(
+        for epoch in range(epochs):
+            actor_loss_epoch, critic_loss_epoch = ppo_update(
                 actor,
                 critic,
                 dataset,
@@ -267,6 +275,19 @@ def main():
                 BETA,
                 epsilon
             )
+            actor_loss_epochs[epoch] = actor_loss_epoch
+            critic_loss_epochs[epoch] = critic_loss_epoch
+        
+        actor_loss_iter[iteration] = actor_loss_epochs.mean()
+        critic_loss_iter[iteration] = critic_loss_epochs.mean()
+
+    plt.plot(actor_loss_iter)
+    plt.plot(critic_loss_iter)
+    plt.show()
+
+
+
+
                 
 if __name__ == "__main__":
     print("Running Training...")
