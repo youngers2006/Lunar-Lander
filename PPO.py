@@ -176,6 +176,21 @@ def policy_rollout(env, actor, critic, dataset, seed, device):
                 state, _ = env.reset(seed=seed)
                 done = False
 
+def test_policy(env, actor, tests, seed):
+    reward_tests = np.empty(shape=(tests,1), dtype=np.float32)
+    for test in range(tests):
+        state, _ = env.reset(seed=seed)
+        reward_total = 0
+        done = False
+        while not done:
+            action, _ = actor.act(state)
+            state_, reward, terminated, truncated, _ = env.step(action)
+            reward_total += reward
+            state = state_
+            done = (terminated or truncated)
+        reward_tests[test] = reward_total
+    return reward_tests
+
 def main():
     if torch.cuda.is_available():
         device = 'cuda'
@@ -195,7 +210,7 @@ def main():
     hs_c1 = 16 ; hs_c2 = 8
     hs_a1 = 16 ; hs_a2 = 8
 
-    Learn_Rate_c = 0.0001 ; Learn_Rate_a = 0.00001
+    Learn_Rate_c = 0.0001 ; Learn_Rate_a = 0.0001
     beta_1_c = 0.999 ; beta_2_c = 0.9
     beta_1_a = 0.999 ; beta_2_a = 0.9
     gamma = 0.999
@@ -246,6 +261,8 @@ def main():
 
     actor_loss_iter = np.empty(shape=(iterations,1), dtype=np.float32)
     critic_loss_iter = np.empty(shape=(iterations,1), dtype=np.float32)
+
+    env_test = gym.make(env_id, render_mode='human')
     
     for iteration in tqdm(range(iterations), leave=True):
         actor_loss_epochs = np.empty(shape=(epochs,1), dtype=np.float32)
@@ -275,20 +292,23 @@ def main():
                 BETA,
                 epsilon
             )
-            actor_loss_epochs[epoch] = actor_loss_epoch
-            critic_loss_epochs[epoch] = critic_loss_epoch
+            actor_loss_epochs[epoch] = actor_loss_epoch.detach().cpu().numpy()
+            critic_loss_epochs[epoch] = critic_loss_epoch.detach().cpu().numpy()
         
         actor_loss_iter[iteration] = actor_loss_epochs.mean()
         critic_loss_iter[iteration] = critic_loss_epochs.mean()
+        rewards_tests = test_policy(
+            env_test, 
+            actor,
+            tests=10,
+            seed=seed
+        )
 
     plt.plot(actor_loss_iter)
     plt.plot(critic_loss_iter)
     plt.show()
 
-
-
-
-                
+   
 if __name__ == "__main__":
     print("Running Training...")
     main()
