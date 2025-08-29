@@ -49,12 +49,12 @@ class DataSet:
         self.returns = torch.zeros((T, 1), dtype=torch.float32, device=device)
     
     def add(self, state, action, reward, pred_value, done, log_prob):
-        self.states[self.t] = torch.tensor(state, dtype=torch.float32, device=self.states.device)
-        self.actions[self.t] = torch.tensor(action, dtype=torch.float32, device=self.actions.device)
-        self.rewards[self.t] = reward
-        self.dones[self.t] = done
-        self.log_probs[self.t] = log_prob
-        self.pred_values[self.t] = pred_value
+        self.states[self.t] = torch.tensor(state, dtype=torch.float32, device=self.states.device).detach()
+        self.actions[self.t] = torch.tensor(action, dtype=torch.float32, device=self.actions.device).detach()
+        self.rewards[self.t] = reward.detach()
+        self.dones[self.t] = done.detach()
+        self.log_probs[self.t] = log_prob.detach()
+        self.pred_values[self.t] = pred_value.detach()
         self.t += 1
 
     def compute_advantage_and_returns(self, critic, lambda_, gamma):
@@ -99,14 +99,16 @@ class DataSet:
         self.t = 0
 
 class Critic(nn.Module):
-    def __init__(self, state_size, hidden_size_1, hidden_size_2):
+    def __init__(self, state_size, hidden_size_1, hidden_size_2, normaliser):
         super().__init__()
         self.L1 = nn.Linear(state_size, hidden_size_1)
         self.L2 = nn.Linear(hidden_size_1, hidden_size_2)
         self.L3 = nn.Linear(hidden_size_2, 1)
         self.relu = nn.ReLU()
+        self.normaliser = normaliser()
 
     def forward(self, x):
+        x = self.normaliser.normalise(x)
         x = self.L1(x)
         x = self.relu(x)
         x = self.L2(x)
@@ -114,7 +116,7 @@ class Critic(nn.Module):
         return self.L3(x)
 
 class Actor(nn.Module):
-    def __init__(self, state_size, hidden_size_1, hidden_size_2, action_space_size, action_low, action_high, device):
+    def __init__(self, state_size, hidden_size_1, hidden_size_2, action_space_size, action_low, action_high, device, normaliser):
         super().__init__()
         self.L1 = nn.Linear(state_size, hidden_size_1)
         self.L2 = nn.Linear(hidden_size_1, hidden_size_2)
@@ -124,8 +126,10 @@ class Actor(nn.Module):
         self.tanh = nn.Tanh()
         self.action_low = torch.tensor(action_low, dtype=torch.float32, device=device)
         self.action_high = torch.tensor(action_high, dtype=torch.float32, device=device)
+        self.normaliser = normaliser(state_size)
 
     def forward(self, x):
+        x = self.normaliser.normalise(x)
         x = self.L1(x)
         x = self.relu(x)
         x = self.L2(x)
@@ -190,12 +194,12 @@ def policy_rollout(env, actor, critic, dataset, seed, device):
             done = (terminated or truncated)
             value = critic(state_tensor)
             dataset.add(
-                torch.tensor(state, dtype=torch.float32, device=device),
+                state_tensor,
                 action.squeeze(0),
                 torch.tensor([reward], dtype=torch.float32, device=device),
-                value.detach(),
+                value,
                 torch.tensor([done], dtype=torch.float32, device=device),
-                log_prob.detach()
+                log_prob
             )
             state = state_
             if done:
@@ -251,10 +255,13 @@ def main():
     state_size = env.observation_space.shape[0]
     action_space_size = env.action_space.shape[0]
 
+    normaliser = StateNorm(state_size)
+
     critic = Critic(
         state_size, 
         hs_c1,
-        hs_c2
+        hs_c2,
+        normaliser
     ).to(device)
 
     action_low = env.action_space.low
@@ -267,7 +274,8 @@ def main():
         action_space_size,
         action_low, 
         action_high,
-        device
+        device,
+        normaliser
     ).to(device)
 
     optimiser_actor = torch.optim.Adam(
