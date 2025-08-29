@@ -12,12 +12,14 @@ class StateNorm:
         self.mean = torch.zeros(size=state_size)
         self.variance = torch.zeros(size=state_size)
         self.count = 1e-4
+        self.ready = True
 
     def update(self, state_batch):
-        batch_mean = torch.mean(state_batch, dim=0)
-        batch_var = torch.var(state_batch, dim=0)
-        batch_count = state_batch.shape[0]
-        self.update_from_moments(batch_mean, batch_var, batch_count)
+        if self.ready:
+            batch_mean = torch.mean(state_batch, dim=0)
+            batch_var = torch.var(state_batch, dim=0)
+            batch_count = state_batch.shape[0]
+            self.update_from_moments(batch_mean, batch_var, batch_count)
 
     def update_from_moments(self, mean, var, count):
         delta = mean - self.mean
@@ -153,10 +155,12 @@ class Actor(nn.Module):
     def scale_action(self, action):
         return self.action_low + (action + 1.0) * 0.5 * (self.action_high - self.action_low)
 
-def ppo_update(actor, critic, dataset, actor_optimizer, critic_optimizer, batch_size, BETA, clip_eps=0.2):
+def ppo_update(actor, critic, dataset, actor_optimizer, critic_optimizer, batch_size, normaliser, BETA, clip_eps=0.2):
     actor_loss_total = 0
     value_loss_total = 0
     for states, actions, returns, advantages, old_log_probs, values in dataset.get_minibatches(batch_size):
+
+        normaliser.update(states)
 
         dist = actor.get_dist(states)
         new_log_probs = dist.log_prob(actions).sum(dim=-1, keepdim=True)
@@ -180,6 +184,8 @@ def ppo_update(actor, critic, dataset, actor_optimizer, critic_optimizer, batch_
 
         actor_loss_total += actor_loss
         value_loss_total += value_loss
+    
+    normaliser.ready = False
 
     return actor_loss_total, value_loss_total
 
@@ -319,6 +325,7 @@ def main():
             lambda_,
             gamma
         )
+        normaliser.ready = True
         for epoch in range(epochs):
             actor_loss_epoch, critic_loss_epoch = ppo_update(
                 actor,
@@ -327,6 +334,7 @@ def main():
                 optimiser_actor,
                 optimiser_critic,
                 batch_size,
+                normaliser,
                 BETA,
                 epsilon
             )
