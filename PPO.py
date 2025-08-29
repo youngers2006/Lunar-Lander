@@ -7,6 +7,33 @@ import math
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
+class StateNorm:
+    def __init__(self, state_size):
+        self.mean = torch.zeros(size=state_size)
+        self.variance = torch.zeros(size=state_size)
+        self.count = 1e-4
+
+    def update(self, state_batch):
+        batch_mean = torch.mean(state_batch, dim=0)
+        batch_var = torch.var(state_batch, dim=0)
+        batch_count = state_batch.shape[0]
+        self.update_from_moments(batch_mean, batch_var, batch_count)
+
+    def update_from_moments(self, mean, var, count):
+        delta = mean - self.mean
+        self.count += count
+        new_mean = self.mean + delta * count / self.count
+        m_a = self.var * self.count
+        m_b = var * count
+        new_var = (m_a + m_b + delta ** 2 * self.count * count / self.count) / self.count
+        self.mean = new_mean
+        self.var = new_var
+
+    def normalise(self, states):
+        states_norm = (states - self.mean) / (torch.sqrt(self.var) + 1e-8)
+        return states_norm
+        
+
 class DataSet:
     def __init__(self, state_dim, action_dim, T, device):
         self.states = torch.zeros(size=(T, state_dim), dtype=torch.float32, device=device)
