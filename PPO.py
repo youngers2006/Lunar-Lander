@@ -242,7 +242,7 @@ def main():
     env = gym.make(env_id)
 
     seed = 43
-    iterations = 500
+    iterations = 500 
     epochs = 10
     T = 1000
     N = 1
