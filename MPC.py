@@ -75,12 +75,13 @@ class MPC:
         self.planning_algorithm.plan(self.horizon)
 
 class iLQR:
-    def __init__(self, dynamics, reward_fn, state_dim, action_dim, device='cpu'):
+    def __init__(self, dynamics, reward_fn, state_dim, action_dim, iter_num,  device='cpu'):
         self.device = device
         self.dynamics = dynamics
         self.reward_fn = reward_fn
         self.state_dim = state_dim
         self.action_dim = action_dim
+        self.num_iterations = iter_num
 
     def update_reward_and_dynamics_models(self, dynamics, reward_fn):
         self.dynamics = dynamics
@@ -132,21 +133,15 @@ class iLQR:
         return F, C, c
         
 
-    def plan(self, planning_horizon, dynamics_model, reward_model, t):
-        
-        Vx = torch.zeros(self.state_dim, device=self.device)
-        Vxx = torch.zeros(self.state_dim, self.state_dim, device=self.device)
-
+    def backwards_pass(self, planning_horizon, Ft, ft, Ct, ct, CTerminal, cTerminal):
         k_gains = torch.zeros(planning_horizon, self.action_dim, device=self.device)
         K_gains = torch.zeros(planning_horizon, self.action_dim, self.state_dim, device=self.device)
 
-        
-
+        Vt = CTerminal
+        vt = cTerminal
         for t in reversed(range(planning_horizon)):
-            Ft, Ct, ct = self.derivatives(ST)
-            
             Qt = Ct + Ft.T @ Vt @ Ft
-            qt = ct + Ft.T @ Vt @ ft + Ft.T @ Vt
+            qt = ct + Ft.T @ Vt @ ft + Ft.T @ vt
 
             Qxx = Qt[0,0]
             Quu = Qt[1,1]
@@ -162,6 +157,37 @@ class iLQR:
 
             Vt = Qxx + Qxu @ Kt + Kt.T @ Qux + Kt.T @ Quu @ Kt
             vt = qx + Qxu @ kt +  Kt.T @ Qux + Kt.T @ Quu @ kt
+
+        return k_gains, K_gains
+    
+    def _forward_pass(self, planning_horizon, nominal_states, nominal_actions, k_gains, K_gains, terminal_cost_function):
+        alpha = 1.0
+
+        nominal_cost = self.get_total_cost()
+        for _ in range(10):
+            new_states = torch.zeros_like(nominal_states)
+            new_actions = torch.zeros_like(nominal_actions)
+            new_states[0] = nominal_states[0]
+
+            for t in range(planning_horizon):
+                dx = new_states[t] - nominal_states[t]
+                new_actions = K_gains[t] @ dx + alpha * k_gains[t] + nominal_actions[t]
+
+                with torch.no_grad():
+                    new_states[t+1] = self.dynamics.next_state(new_states[t], new_actions[t])
+            
+            new_cost = self.get_total_cost() # sort later
+
+            if new_cost < nominal_cost:
+                return new_states, new_actions
+            
+            alpha *= 0.5
+
+        return nominal_states, nominal_actions
+    
+    def plan():
+
+        
 
             
 
