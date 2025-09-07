@@ -66,16 +66,9 @@ class RewardModel:
         )
         return self.reward_net(x)
 
-class MPC:
-    def __init__(self, planner, planning_horizon):
-        self.planning_algorithm = planner
-        self.horizon = planning_horizon
-
-    def act(self):
-        self.planning_algorithm.plan(self.horizon)
 
 class iLQR:
-    def __init__(self, dynamics, reward_fn, state_dim, action_dim, iter_num,  device='cpu'):
+    def __init__(self, dynamics, reward_fn, state_dim, action_dim, iter_num, device='cpu'):
         self.device = device
         self.dynamics = dynamics
         self.reward_fn = reward_fn
@@ -186,9 +179,17 @@ class iLQR:
         return nominal_states, nominal_actions
     
     def plan():
+        return nominal_actions.detach
 
         
+class MPC:
+    def __init__(self, planner: iLQR, planning_horizon):
+        self.planning_algorithm = planner
+        self.horizon = planning_horizon
 
+    def act(self):
+        actions = self.planning_algorithm.plan(self.horizon)
+        return actions[0]
             
 
 def main():
