@@ -128,6 +128,7 @@ class iLQR:
             create_graph=False, 
             strict=False
         )
+
         return F, C, c
         
 
@@ -136,17 +137,33 @@ class iLQR:
         Vx = torch.zeros(self.state_dim, device=self.device)
         Vxx = torch.zeros(self.state_dim, self.state_dim, device=self.device)
 
-        Kx = torch.zeros(self.state_dim, device=self.device)
-        Kxx = torch.zeros(self.state_dim, self.state_dim, device=self.device)
+        k_gains = torch.zeros(planning_horizon, self.action_dim, device=self.device)
+        K_gains = torch.zeros(planning_horizon, self.action_dim, self.state_dim, device=self.device)
+
+        
 
         for t in reversed(range(planning_horizon)):
             Ft, Ct, ct = self.derivatives(ST)
-            Qt = Ct + Ft.T @ Vt_ @ Ft
-            qt = ct + Ft.T @ Vt_ @ ft + Ft.T @ Vt_
             
+            Qt = Ct + Ft.T @ Vt @ Ft
+            qt = ct + Ft.T @ Vt @ ft + Ft.T @ Vt
 
+            Qxx = Qt[0,0]
+            Quu = Qt[1,1]
+            Qux = Qt[1,0]
+            Qxu = Qt[0,1]
+            qu = qt[1]
+            qx = qt[0]
 
+            Quu_inv = torch.linalg.inv(Quu)
 
+            Kt = - Quu_inv @ Qux
+            kt = - Quu_inv @ qu
+
+            Vt = Qxx + Qxu @ Kt + Kt.T @ Qux + Kt.T @ Quu @ Kt
+            vt = qx + Qxu @ kt +  Kt.T @ Qux + Kt.T @ Quu @ kt
+
+            
 
 def main():
     if torch.cuda.is_available():
