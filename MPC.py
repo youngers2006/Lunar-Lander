@@ -75,13 +75,76 @@ class MPC:
         self.planning_algorithm.plan(self.horizon)
 
 class iLQR:
-    def __init__(self):
-        pass
+    def __init__(self, dynamics, reward_fn, state_dim, action_dim, device='cpu'):
+        self.device = device
+        self.dynamics = dynamics
+        self.reward_fn = reward_fn
+        self.state_dim = state_dim
+        self.action_dim = action_dim
 
-    def linearise(self, )
+    def update_reward_and_dynamics_models(self, dynamics, reward_fn):
+        self.dynamics = dynamics
+        self.reward_fn = reward_fn
 
-    def plan(self, planning_horizon, dynamics_model, reward_model):
-        pass
+    def cost_function(self, state, action):
+        reward = self.reward_fn.forward(state, action)
+        cost = -reward.squeeze(-1)
+        return cost
+
+    def derivatives(self, state, action):
+        self.reward_fn.eval()
+        self.dynamics.eval()
+
+        concat_sa = torch.cat(
+            tensors=[state, action],
+            dim=-1
+        )
+
+        def f(concat_input): 
+            x = concat_input[state.shape[0]:]
+            u = concat_input[:state.shape[0]]
+            return self.dynamics.next_state(x, u)
+        
+        def c(concat_input): 
+            x = concat_input[state.shape[0]:]
+            u = concat_input[:state.shape[0]]
+            return self.cost_function(x, u)
+
+        F = torch.autograd.functional.jacobian(
+            func=f, 
+            inputs=(concat_sa), 
+            create_graph=False, 
+            strict=False
+        )
+        c = torch.autograd.functional.jacobian(
+            func=f, 
+            inputs=(concat_sa), 
+            create_graph=False, 
+            strict=False
+        )
+        C = torch.autograd.functional.hessian(
+            func=c, 
+            inputs=(concat_sa), 
+            create_graph=False, 
+            strict=False
+        )
+        return F, C, c
+        
+
+    def plan(self, planning_horizon, dynamics_model, reward_model, t):
+        
+        Vx = torch.zeros(self.state_dim, device=self.device)
+        Vxx = torch.zeros(self.state_dim, self.state_dim, device=self.device)
+
+        Kx = torch.zeros(self.state_dim, device=self.device)
+        Kxx = torch.zeros(self.state_dim, self.state_dim, device=self.device)
+
+        for t in reversed(range(planning_horizon)):
+            Ft, Ct, ct = self.derivatives(ST)
+            Qt = Ct + Ft.T @ Vt_ @ Ft
+            qt = ct + Ft.T @ Vt_ @ ft + Ft.T @ Vt_
+            
+
 
 
 
