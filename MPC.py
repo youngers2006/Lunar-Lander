@@ -90,6 +90,7 @@ class iLQR:
         return cost
     
     def terminal_cost_function(self, state_T):
+        
         return cost_T
     
     def get_total_cost(self, states, actions):
