@@ -31,7 +31,7 @@ class DataSet:
 
     def random_rollout(self, random_rollouts):
         state, _ = self.env.reset(seed=self.seed)
-        for _ in range(random_rollouts):
+        for _ in tqdm(range(random_rollouts), desc="Rolling out random policy", leave=False):
             action = self.random_policy()
             state_, reward, terminated, truncated, _ = self.env.step(action)
             self.add_sample(
@@ -47,7 +47,7 @@ class DataSet:
 
     def rollout(self, MPC):
         state, _ = self.env.reset(seed=self.seed)
-        for _ in range(self.update_interval):
+        for _ in tqdm(range(self.update_interval), desc="rolling out MPC", leave=False):
             action = MPC.act(state, self.goal_state)
             action = action.detach().cpu().numpy().flatten()
             state_, reward, terminated, truncated, _ = self.env.step(action)
@@ -93,7 +93,7 @@ class DataSet:
             epoch_loss_dyn = 0.0
             epoch_loss_rew = 0.0
             batch_count = 0
-            for reward_batch, state_batch, next_state_batch, action_batch in tqdm(self.batch_samples(batch_size), desc=f'epoch {epoch} / {epochs}', leave=False):
+            for reward_batch, state_batch, next_state_batch, action_batch in tqdm(self.batch_samples(batch_size), desc=f'Updating models. In epoch {epoch} / {epochs}', leave=False):
                 batch_count += 1
                 batch_dyn_loss = torch.mean((dynamics_model.next_state(state_batch, action_batch) - next_state_batch).pow(2))
                 batch_rew_loss = torch.mean((reward_model(state_batch, action_batch) - reward_batch).pow(2))
@@ -181,6 +181,7 @@ class iLQR:
             state_dim, 
             action_dim, 
             iter_num, 
+            variance_weight,
             target_weights=[100,100,100,100,50,20,0,0], 
             device='cpu'
         ):
@@ -191,8 +192,11 @@ class iLQR:
         self.action_dim = action_dim
         self.num_iterations = iter_num
         self.lambda_ = 1.0
-        self.variance_weight = 0.01
+        self.variance_weight = variance_weight
         self.Q_final = torch.diag(torch.tensor(target_weights, dtype=torch.float32, device=device))
+        self.early_stop_tol = 1e-3
+        self.last_nominal_states = None
+        self.last_nominal_actions = None
 
     def increase_lambda(self, factor):
         self.lambda_ *= factor
@@ -290,10 +294,22 @@ class iLQR:
             qu = qt[self.state_dim:]
             qx = qt[:self.state_dim]
 
-            Quu_reg = Quu + self.lambda_ * Iu
+            damping = 0.0
+            inv_Quu = None
+            while True:
+                Quu_reg = Quu + self.lambda_ * Iu
+                try:
+                    L = torch.linalg.cholesky(Quu_reg)
+                    inv_Quu = torch.cholesky_inverse(L)
+                    break
+                except RuntimeError:
+                    damping = 2 * damping + 1e-6
+                    if damping > 1e6:
+                        inv_Quu = torch.linalg.pinv(Quu_reg)
+                        break
 
-            Kt = - torch.linalg.solve(Quu_reg, Qux)
-            kt = - torch.linalg.solve(Quu_reg, qu)
+            Kt = - inv_Quu @ Qux
+            kt = - inv_Quu @ qu
 
             K_gains[t] = Kt
             k_gains[t] = kt
@@ -307,7 +323,7 @@ class iLQR:
         alpha = 1.0
         success = False
         nominal_cost = self.get_total_cost(nominal_states, nominal_actions, goal_state)
-        for _ in range(10):
+        for _ in range(5):
             new_states = nominal_states.clone()
             new_actions = nominal_actions.clone()
             for t in range(planning_horizon):
@@ -317,11 +333,27 @@ class iLQR:
             new_cost = self.get_total_cost(new_states, new_actions, goal_state) 
             if new_cost < nominal_cost:
                 success = True
-                return new_states, new_actions, success
+                return new_states, new_actions, success, new_cost
             alpha *= 0.5
-        return nominal_states, nominal_actions, success
+        return nominal_states, nominal_actions, success, nominal_cost
     
-    def initial_guess(self, x0, planning_horizon):
+    def initial_guess(self, x0, planning_horizon, warm_start=None):
+        if warm_start is not None:
+            prev_states, prev_actions = warm_start
+            if prev_actions.shape == planning_horizon:
+                nominal_states = torch.zeros(planning_horizon+1, self.state_dim, device=self.device)
+                nominal_actions = torch.zeros(planning_horizon, self.action_dim, device=self.device)
+                nominal_states[0] = x0
+                if planning_horizon > 1:
+                    nominal_actions[:-1] = prev_actions[1:]
+                for t in range(planning_horizon):
+                    nominal_states[t+1] = self.dynamics.next_state(
+                        nominal_states[t],
+                        nominal_actions[t],
+                        deterministic=True
+                    )
+                return nominal_states, nominal_actions
+        # cold start
         nominal_states = torch.zeros(planning_horizon+1, self.state_dim, device=self.device)
         nominal_states[0] = x0
         nominal_actions = torch.zeros(planning_horizon, self.action_dim, device=self.device)
@@ -331,13 +363,20 @@ class iLQR:
     
     def plan(self, planning_horizon, state_I, goal_state):
         self.dynamics.eval() ; self.reward_fn.eval()
-        with torch.zero_grad():
-            state_I = torch.tensor(state_I, dtype=torch.float32, device=self.device)
-            nominal_states, nominal_actions = self.initial_guess(state_I, planning_horizon)
-            for i in range(self.num_iterations):
-                F, f = self.linearise_dynamics(nominal_states, nominal_actions)
-                C, c, CT, cT = self.derivatives(nominal_states, nominal_actions, goal_state)
-                k_gains, K_gains = self.backwards_pass(
+        state_I = torch.tensor(state_I, dtype=torch.float32, device=self.device)
+        goal_state = torch.as_tensor(goal_state, dtype=torch.float32, device=self.device)
+
+        warm = None
+        if self.last_nominal_states is not None and self.last_nominal_actions is not None:
+            warm = (self.last_nominal_states, self.last_nominal_actions)
+
+        nominal_states, nominal_actions = self.initial_guess(state_I, planning_horizon, warm_start=warm)
+        prev_cost = self.get_total_cost(nominal_states, nominal_actions, goal_state)
+
+        for i in range(self.num_iterations):
+            F, f = self.linearise_dynamics(nominal_states, nominal_actions)
+            C, c, CT, cT = self.derivatives(nominal_states, nominal_actions, goal_state)
+            k_gains, K_gains = self.backwards_pass(
                 planning_horizon, 
                 F, 
                 f, 
@@ -346,7 +385,7 @@ class iLQR:
                 CT, 
                 cT
             )
-                new_states, new_actions, success = self._forward_pass(
+            new_states, new_actions, success, new_cost = self._forward_pass(
                 planning_horizon, 
                 nominal_states, 
                 nominal_actions, 
@@ -354,16 +393,22 @@ class iLQR:
                 K_gains, 
                 goal_state
             )
-                if success:
-                    nominal_states = new_states
-                    nominal_actions = new_actions
-                    self.decrease_lambda(factor=1.5)
-                else:
-                    self.increase_lambda(factor=5.0)
-                    if self.lambda_ > 1e6:
-                        print(f"algorithm couldnt converge after iteration {i+1}.")
-                        break
-            return nominal_actions.detach()
+            if success:
+                improvement = prev_cost - new_cost
+                nominal_states = new_states
+                nominal_actions = new_actions
+                prev_cost = new_cost
+                self.decrease_lambda(factor=1.5)
+                if improvement < self.early_stop_tol:
+                    break
+            else:
+                self.increase_lambda(factor=5.0)
+                if self.lambda_ > 1e6:
+                    print(f"algorithm couldnt converge after iteration {i+1}.")
+                    break
+        self.last_nominal_states = nominal_states.detach()
+        self.last_nominal_actions = nominal_actions.detach()
+        return nominal_actions.detach()
         
 class MPC:
     def __init__(self, planner: iLQR, planning_horizon):
@@ -371,6 +416,7 @@ class MPC:
         self.horizon = planning_horizon
 
     def act(self, state, goal_state):
+        goal_state = torch.as_tensor(goal_state, dtype=torch.float32, device=self.planning_algorithm.device)
         actions = self.planning_algorithm.plan(self.horizon, state, goal_state)
         return actions[0]
             
@@ -386,20 +432,21 @@ def train():
     env_id = 'LunarLanderContinuous-v3'
     env = gym.make(env_id)
 
-    horizon = 30
-    iLQR_iters = 50
+    horizon = 10
+    iLQR_iters = 10
     update_interval = 5000
     random_rollouts = 100000
     dataset_length = 100000
     training_rollouts = 100
     hd1 = 128 ; hd2 = 64
     hr1 = 128 ; hr2 = 64
-    epochs = 50
-    batch_size = 100
+    epochs = 10
+    batch_size = 1000
     learn_rate_rew = 0.001
     learn_rate_dyn = 0.001
+    variance_weight = 0.0
 
-    goal_state = torch.tensor([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1, 1], device=device)
+    goal_state = torch.tensor([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1, 1], dtype=torch.float32, device=device)
     state_size = env.observation_space.shape[0]
     action_size = env.action_space.shape[0]
 
@@ -413,7 +460,6 @@ def train():
         seed, 
         device
     )
-
     dynamics_model = DynamicsModel(
         state_size, 
         action_size, 
@@ -432,6 +478,7 @@ def train():
         reward_model,
         state_size,
         action_size,
+        variance_weight=variance_weight,
         iter_num=iLQR_iters,
         device=device
     )
@@ -451,9 +498,9 @@ def train():
 
     progress_tracker = []
     print("started random rollouts")
-    data_set.random_rollout(random_rollouts)
-    print("Updating models")
-    data_set.train_dynamics_and_reward(
+    for _ in range(500):
+        data_set.random_rollout(random_rollouts)
+        data_set.train_dynamics_and_reward(
         epochs, 
         dynamics_model, 
         reward_model, 
@@ -461,9 +508,7 @@ def train():
         reward_optimiser, 
         batch_size
     )
-    MPC_controller.planning_algorithm.update_reward_and_dynamics_models(dynamics_model, reward_model)
-    reward_test = test(MPC_controller)
-    progress_tracker.append(reward_test)
+        MPC_controller.planning_algorithm.update_reward_and_dynamics_models(dynamics_model, reward_model)
     print("starting MPC rollouts")
     for _ in tqdm(range(training_rollouts), leave=False):
         data_set.rollout(MPC_controller)
