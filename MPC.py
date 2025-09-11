@@ -10,8 +10,9 @@ from collections import deque
 import itertools
 
 class Dataset:
-    def __init__(self, state_size, action_size, env, update_interval, dataset_length, random_rollouts, seed, device):
+    def __init__(self, goal_state, state_size, action_size, env, update_interval, dataset_length, random_rollouts, seed, device):
         self.seed = seed
+        self.goal_state = goal_state
         self.state_size = state_size
         self.action_size = action_size
         self.random_rollouts = random_rollouts
@@ -46,10 +47,11 @@ class Dataset:
                 state, _ = self.env.reset
                 terminated = False ; truncated = False
 
-    def rollout(self, policy):
+    def rollout(self, MPC):
         state, _ = self.env.reset(seed=self.seed)
         for t in range(self.update_interval):
-            action = policy() # need to finish this bit
+            action = MPC.act(state, self.goal_state)
+            action = action.detach().cpu().numpy().flatten()
             state_, reward, terminated, truncated, _ = self.env.step(action)
             self.add_sample(
                 reward, 
@@ -85,12 +87,11 @@ class Dataset:
 
             yield rb, sb, nsb, ab
 
-
     def train_dynamics_and_reward(self, dynamics_model, reward_model, dyn_optimiser, rew_optimiser, batch_size):
         dyn_loss_total = 0.0
         rew_loss_total = 0.0
         for reward_batch, state_batch, next_state_batch, action_batch in self.batch_samples(batch_size):
-            batch_dyn_loss = torch.mean((dynamics_model(state_batch, action_batch) - next_state_batch).pow(2))
+            batch_dyn_loss = torch.mean((dynamics_model.next_state(state_batch, action_batch) - next_state_batch).pow(2))
             batch_rew_loss = torch.mean((reward_model(state_batch, action_batch) - reward_batch).pow(2))
 
             dyn_optimiser.zero_grad()
@@ -106,7 +107,6 @@ class Dataset:
 
         return dyn_loss_total, rew_loss_total
         
-
 class DynamicsModel:
     def __init__(self, state_size, action_size, hidden1_size, hidden2_size):
         super().__init__()
@@ -377,8 +377,8 @@ class MPC:
         self.planning_algorithm = planner
         self.horizon = planning_horizon
 
-    def act(self):
-        actions = self.planning_algorithm.plan(self.horizon)
+    def act(self, state, goal_state):
+        actions = self.planning_algorithm.plan(self.horizon, state, goal_state)
         return actions[0]
             
 def main():
