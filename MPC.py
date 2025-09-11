@@ -85,13 +85,15 @@ class DataSet:
             yield rb, sb, nsb, ab
 
     def train_dynamics_and_reward(self, epochs, dynamics_model, reward_model, dyn_optimiser, rew_optimiser, batch_size):
+        dynamics_model.to(self.device)
+        reward_model.to(self.device)
         dyn_loss_total = []
         rew_loss_total = []
-        for _ in range(epochs):
+        for epoch in range(epochs):
             epoch_loss_dyn = 0.0
             epoch_loss_rew = 0.0
             batch_count = 0
-            for reward_batch, state_batch, next_state_batch, action_batch in self.batch_samples(batch_size):
+            for reward_batch, state_batch, next_state_batch, action_batch in tqdm(self.batch_samples(batch_size), desc=f'epoch {epoch} / {epochs}', leave=False):
                 batch_count += 1
                 batch_dyn_loss = torch.mean((dynamics_model.next_state(state_batch, action_batch) - next_state_batch).pow(2))
                 batch_rew_loss = torch.mean((reward_model(state_batch, action_batch) - reward_batch).pow(2))
@@ -203,12 +205,10 @@ class iLQR:
         self.reward_fn = reward_fn.to(self.device)
 
     def cost_function(self, state, action):
-        with torch.no_grad():
-            reward = self.reward_fn.forward(state, action)
+        reward = self.reward_fn.forward(state, action)
         cost = -reward.squeeze(-1)
         if self.variance_weight > 0:
-            with torch.no_grad():
-                _, sigma = self.dynamics.forward(state, action)
+            _, sigma = self.dynamics.forward(state, action)
             cost = cost + self.variance_weight * sigma.pow(2).sum()
         return cost
     
@@ -275,6 +275,8 @@ class iLQR:
 
         Vt = CTerminal
         vt = cTerminal
+        Iu = torch.eye(self.action_dim, dtype=torch.float32, device=self.device)
+
         for t in reversed(range(planning_horizon)):
             Ct, ct, Ft, ft = C[t], c[t], F[t], f[t]
 
@@ -288,7 +290,7 @@ class iLQR:
             qu = qt[self.state_dim:]
             qx = qt[:self.state_dim]
 
-            Quu_reg = Quu + self.lambda_ * torch.eye(self.action_dim, device=self.device)
+            Quu_reg = Quu + self.lambda_ * Iu
 
             Kt = - torch.linalg.solve(Quu_reg, Qux)
             kt = - torch.linalg.solve(Quu_reg, qu)
@@ -392,7 +394,7 @@ def train():
     training_rollouts = 100
     hd1 = 128 ; hd2 = 64
     hr1 = 128 ; hr2 = 64
-    epochs = 1000
+    epochs = 50
     batch_size = 100
     learn_rate_rew = 0.001
     learn_rate_dyn = 0.001
@@ -448,8 +450,9 @@ def train():
     )
 
     progress_tracker = []
-    
+    print("started random rollouts")
     data_set.random_rollout(random_rollouts)
+    print("Updating models")
     data_set.train_dynamics_and_reward(
         epochs, 
         dynamics_model, 
@@ -461,6 +464,7 @@ def train():
     MPC_controller.planning_algorithm.update_reward_and_dynamics_models(dynamics_model, reward_model)
     reward_test = test(MPC_controller)
     progress_tracker.append(reward_test)
+    print("starting MPC rollouts")
     for _ in tqdm(range(training_rollouts), leave=False):
         data_set.rollout(MPC_controller)
         data_set.train_dynamics_and_reward(
@@ -505,7 +509,9 @@ def test(MPC_controller, **kwargs):
             
 def main():
     MPC_controller, progress = train()
+    print("Finished training, beginning testing")
     rewards_test = test(MPC_controller, render_mode='human')
+    print("Finished testing")
     plt.plot(progress)
     print(f'Trained controller scored a mean final reward of {rewards_test} having been trained')
     plt.show()
