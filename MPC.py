@@ -31,7 +31,7 @@ class DataSet:
 
     def random_rollout(self, random_rollouts):
         state, _ = self.env.reset(seed=self.seed)
-        for t in range(random_rollouts):
+        for _ in range(random_rollouts):
             action = self.random_policy()
             state_, reward, terminated, truncated, _ = self.env.step(action)
             self.add_sample(
@@ -43,12 +43,11 @@ class DataSet:
             state = state_
             self.sample_count += 1
             if (terminated or truncated):
-                state, _ = self.env.reset
-                terminated = False ; truncated = False
+                state, _ = self.env.reset(seed=self.seed)
 
     def rollout(self, MPC):
         state, _ = self.env.reset(seed=self.seed)
-        for t in range(self.update_interval):
+        for _ in range(self.update_interval):
             action = MPC.act(state, self.goal_state)
             action = action.detach().cpu().numpy().flatten()
             state_, reward, terminated, truncated, _ = self.env.step(action)
@@ -89,7 +88,7 @@ class DataSet:
     def train_dynamics_and_reward(self, epochs, dynamics_model, reward_model, dyn_optimiser, rew_optimiser, batch_size):
         dyn_loss_total = []
         rew_loss_total = []
-        for epoch in epochs:
+        for _ in range(epochs):
             epoch_loss_dyn = 0.0
             epoch_loss_rew = 0.0
             batch_count = 0
@@ -114,7 +113,7 @@ class DataSet:
 
         return dyn_loss_total, rew_loss_total
         
-class DynamicsModel:
+class DynamicsModel(nn.Module):
     def __init__(self, state_size, action_size, hidden1_size, hidden2_size):
         super().__init__()
         self.shared_net = nn.Sequential(
@@ -152,8 +151,7 @@ class DynamicsModel:
         next_state_prediction = state + delta_state
         return next_state_prediction
 
-
-class RewardModel:
+class RewardModel(nn.Module):
     def __init__(self, state_size, action_size, hidden1_size, hidden2_size):
         super().__init__()
         self.reward_net = nn.Sequential(
@@ -170,7 +168,6 @@ class RewardModel:
             dim=-1
         )
         return self.reward_net(x)
-
 
 class iLQR:
     def __init__(
@@ -209,7 +206,7 @@ class iLQR:
     
     def terminal_cost_function(self, state_T, goal_state):
         delta_state = state_T - goal_state
-        cost_T = (delta_state).T @ self.Q_final @ (delta_state)
+        cost_T = delta_state.T @ self.Q_final @ delta_state
         return cost_T
     
     def get_total_cost(self, states, actions, goal_state):
@@ -288,12 +285,12 @@ class iLQR:
             Qt = Ct + Ft.T @ Vt @ Ft
             qt = ct + Ft.T @ Vt @ ft + Ft.T @ vt
 
-            Qxx = Qt[0:self.state_dim,0:self.state_dim]
+            Qxx = Qt[:self.state_dim,:self.state_dim]
             Quu = Qt[self.state_dim:,self.state_dim:]
-            Qux = Qt[self.state_dim:,0:self.state_dim]
-            Qxu = Qt[0:self.state_dim,self.state_dim:]
+            Qux = Qt[self.state_dim:,:self.state_dim]
+            Qxu = Qt[:self.state_dim,self.state_dim:]
             qu = qt[self.state_dim:]
-            qx = qt[0:self.state_dim]
+            qx = qt[:self.state_dim]
 
             Quu_reg = Quu + self.lambda_ * torch.eye(self.action_dim, device=self.device)
 
@@ -304,7 +301,7 @@ class iLQR:
             k_gains[t] = kt
 
             Vt = Qxx + Qxu @ Kt + Kt.T @ Qux + Kt.T @ Quu_reg @ Kt
-            vt = qx + Qxu @ kt +  Kt.T @ qu + Kt.T @ Quu_reg @ kt
+            vt = qx + Qxu @ kt + Kt.T @ qu + Kt.T @ Quu_reg @ kt
 
         return k_gains, K_gains
     
@@ -378,7 +375,6 @@ class iLQR:
                 if self.lambda_ > 1e6:
                     print(f"algorithm couldnt converge after iteration {i+1}.")
         return nominal_actions.detach()
-
         
 class MPC:
     def __init__(self, planner: iLQR, planning_horizon):
@@ -425,13 +421,22 @@ def train():
         env, 
         update_interval, 
         dataset_length, 
-        random_rollouts, 
         seed, 
         device
     )
 
-    dynamics_model = DynamicsModel(state_size, action_size, hd1, hd2)
-    reward_model = RewardModel(state_size, action_size, hr1, hr2)
+    dynamics_model = DynamicsModel(
+        state_size, 
+        action_size, 
+        hd1, 
+        hd2
+    )
+    reward_model = RewardModel(
+        state_size, 
+        action_size, 
+        hr1, 
+        hr2
+    )
 
     iLQR_planner = iLQR(
         dynamics_model,
@@ -511,12 +516,11 @@ def test(MPC_controller, **kwargs):
     mean_reward = np.mean(rewards)
     return mean_reward
             
-
 def main():
-    MPC_controller, rewards_over_training = train()
+    MPC_controller, progress = train()
     rewards_test = test(MPC_controller, render_mode='human')
-    plt.plot(rewards_test)
-    plt.plot(rewards_over_training)
+    plt.plot(progress)
+    print(f'Trained controller scored a mean final reward of {rewards_test} having been trained')
     plt.show()
 
 if __name__ == "__main__":
