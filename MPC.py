@@ -140,13 +140,16 @@ class DynamicsModel(nn.Module):
 
         return mu, sigma
     
-    def next_state(self, state, action):
+    def next_state(self, state, action, deterministic=True):
         mu, sigma = self.forward(state, action)
-        state_dist = torch.distributions.Normal(
-            loc=mu, 
-            scale=sigma
-        )
-        delta_state = state_dist.rsample()
+        if deterministic:
+            delta_state = mu
+        else:
+            state_dist = torch.distributions.Normal(
+                loc=mu, 
+                scale=sigma
+            )
+            delta_state = state_dist.rsample()
         next_state_prediction = state + delta_state
         return next_state_prediction
 
@@ -180,13 +183,14 @@ class iLQR:
             device='cpu'
         ):
         self.device = device
-        self.dynamics = dynamics
-        self.reward_fn = reward_fn
+        self.dynamics = dynamics.to(device)
+        self.reward_fn = reward_fn.to(device)
         self.state_dim = state_dim
         self.action_dim = action_dim
         self.num_iterations = iter_num
         self.lambda_ = 1.0
-        self.Q_final = torch.diag(torch.tensor(target_weights))
+        self.variance_weight = 0.01
+        self.Q_final = torch.diag(torch.tensor(target_weights, dtype=torch.float32, device=device))
 
     def increase_lambda(self, factor):
         self.lambda_ *= factor
@@ -195,12 +199,17 @@ class iLQR:
         self.lambda_ /= factor
 
     def update_reward_and_dynamics_models(self, dynamics, reward_fn):
-        self.dynamics = dynamics
-        self.reward_fn = reward_fn
+        self.dynamics = dynamics.to(self.device)
+        self.reward_fn = reward_fn.to(self.device)
 
     def cost_function(self, state, action):
-        reward = self.reward_fn.forward(state, action)
+        with torch.no_grad():
+            reward = self.reward_fn.forward(state, action)
         cost = -reward.squeeze(-1)
+        if self.variance_weight > 0:
+            with torch.no_grad():
+                _, sigma = self.dynamics.forward(state, action)
+            cost = cost + self.variance_weight * sigma.pow(2).sum()
         return cost
     
     def terminal_cost_function(self, state_T, goal_state):
@@ -219,9 +228,7 @@ class iLQR:
         return total_cost
 
     def derivatives(self, states, actions, goal_state):
-
         planning_horizon = actions.shape[0]
-        
         C_list = torch.zeros(planning_horizon, self.state_dim + self.action_dim, self.state_dim + self.action_dim, device=self.device)
         c_list = torch.zeros(planning_horizon, self.state_dim + self.action_dim, device=self.device)
 
@@ -231,20 +238,16 @@ class iLQR:
                 return self.cost_function(x, u)
         
         for t in range(planning_horizon):
-            state = states[t]
-            action = actions[t]
-            concat_sa = torch.cat(tensors=[state, action], dim=-1)
-
-            c_list[t] = torch.autograd.functional.jacobian(func=cost_wrapped, inputs=concat_sa)
-            C_list[t] = torch.autograd.functional.hessian(func=cost_wrapped, inputs=concat_sa)
+            concat_sa = torch.cat(tensors=[states[t], actions[t]], dim=-1).detach().requires_grad_(True)
+            c_list[t] = torch.autograd.functional.jacobian(cost_wrapped, concat_sa)
+            C_list[t] = torch.autograd.functional.hessian(cost_wrapped, concat_sa)
         
         def terminal_cost_wrapped(state_T):
             return self.terminal_cost_function(state_T, goal_state)
         
-        last_state = states[-1]
-        cT = torch.autograd.functional.jacobian(func=terminal_cost_wrapped, inputs=last_state)
-        CT = torch.autograd.functional.hessian(func=terminal_cost_wrapped, inputs=last_state)
-        
+        last_state = states[-1].detach().requires_grad_(True)
+        cT = torch.autograd.functional.jacobian(terminal_cost_wrapped, last_state)
+        CT = torch.autograd.functional.hessian(terminal_cost_wrapped, last_state)
         return C_list, c_list, CT, cT
     
     def linearise_dynamics(self, states, actions):
@@ -256,20 +259,14 @@ class iLQR:
         def dynamics_wrapped(xu_input): 
                 x = xu_input[:self.state_dim] 
                 u = xu_input[self.state_dim:] 
-                return self.dynamics.next_state(x, u)
+                return self.dynamics.next_state(x, u, deterministic=True)
         
         for t in range(planning_horizon):
-            state = states[t]
-            action = actions[t]
-            xu = torch.cat(tensors=[state, action], dim=-1)
-    
-            with torch.no_grad():
-                x_next = dynamics_wrapped(xu)
-            
+            xu = torch.cat(tensors=[states[t], actions[t]], dim=-1)
+            x_next = dynamics_wrapped(xu)
             Ft = torch.autograd.functional.jacobian(func=dynamics_wrapped, inputs=xu)
             f_list[t] = x_next - Ft @ xu
             F_list[t] = Ft
-
         return F_list, f_list
 
     def backwards_pass(self, planning_horizon, F, f, C, c, CTerminal, cTerminal):
@@ -307,48 +304,38 @@ class iLQR:
     def _forward_pass(self, planning_horizon, nominal_states, nominal_actions, k_gains, K_gains, goal_state):
         alpha = 1.0
         success = False
-
         nominal_cost = self.get_total_cost(nominal_states, nominal_actions, goal_state)
         for _ in range(10):
-            new_states = torch.zeros_like(nominal_states)
-            new_actions = torch.zeros_like(nominal_actions)
-            new_states[0] = nominal_states[0]
-
+            new_states = nominal_states.clone()
+            new_actions = nominal_actions.clone()
             for t in range(planning_horizon):
                 dx = new_states[t] - nominal_states[t]
                 new_actions[t] = nominal_actions[t] + alpha * k_gains[t] + K_gains[t] @ dx
-
-                with torch.no_grad():
-                    new_states[t+1] = self.dynamics.next_state(new_states[t], new_actions[t])
-            
+                new_states[t+1] = self.dynamics.next_state(new_states[t], new_actions[t], deterministic=True)
             new_cost = self.get_total_cost(new_states, new_actions, goal_state) 
-
             if new_cost < nominal_cost:
                 success = True
                 return new_states, new_actions, success
-            
             alpha *= 0.5
-
         return nominal_states, nominal_actions, success
     
     def initial_guess(self, x0, planning_horizon):
         nominal_states = torch.zeros(planning_horizon+1, self.state_dim, device=self.device)
         nominal_states[0] = x0
         nominal_actions = torch.zeros(planning_horizon, self.action_dim, device=self.device)
-
-        with torch.no_grad():
-            for t in range(planning_horizon):
-                nominal_states[t+1] = self.dynamics.next_state(nominal_states[t], nominal_actions[t])
-
+        for t in range(planning_horizon):
+            nominal_states[t+1] = self.dynamics.next_state(nominal_states[t], nominal_actions[t], deterministic=True)
         return nominal_states, nominal_actions
     
     def plan(self, planning_horizon, state_I, goal_state):
-        state_I = torch.tensor(state_I, dtype=torch.float32, device=self.device)
-        nominal_states, nominal_actions = self.initial_guess(state_I, planning_horizon)
-        for i in range(self.num_iterations):
-            F, f = self.linearise_dynamics(nominal_states, nominal_actions)
-            C, c, CT, cT = self.derivatives(nominal_states, nominal_actions, goal_state)
-            k_gains, K_gains = self.backwards_pass(
+        self.dynamics.eval() ; self.reward_fn.eval()
+        with torch.zero_grad():
+            state_I = torch.tensor(state_I, dtype=torch.float32, device=self.device)
+            nominal_states, nominal_actions = self.initial_guess(state_I, planning_horizon)
+            for i in range(self.num_iterations):
+                F, f = self.linearise_dynamics(nominal_states, nominal_actions)
+                C, c, CT, cT = self.derivatives(nominal_states, nominal_actions, goal_state)
+                k_gains, K_gains = self.backwards_pass(
                 planning_horizon, 
                 F, 
                 f, 
@@ -357,7 +344,7 @@ class iLQR:
                 CT, 
                 cT
             )
-            new_states, new_actions, success = self._forward_pass(
+                new_states, new_actions, success = self._forward_pass(
                 planning_horizon, 
                 nominal_states, 
                 nominal_actions, 
@@ -365,15 +352,16 @@ class iLQR:
                 K_gains, 
                 goal_state
             )
-            if success:
-                nominal_states = new_states
-                nominal_actions = new_actions
-                self.decrease_lambda(factor=1.5)
-            else:
-                self.increase_lambda(factor=5.0)
-                if self.lambda_ > 1e6:
-                    print(f"algorithm couldnt converge after iteration {i+1}.")
-        return nominal_actions.detach()
+                if success:
+                    nominal_states = new_states
+                    nominal_actions = new_actions
+                    self.decrease_lambda(factor=1.5)
+                else:
+                    self.increase_lambda(factor=5.0)
+                    if self.lambda_ > 1e6:
+                        print(f"algorithm couldnt converge after iteration {i+1}.")
+                        break
+            return nominal_actions.detach()
         
 class MPC:
     def __init__(self, planner: iLQR, planning_horizon):
@@ -429,13 +417,13 @@ def train():
         action_size, 
         hd1, 
         hd2
-    )
+    ).to(device)
     reward_model = RewardModel(
         state_size, 
         action_size, 
         hr1, 
         hr2
-    )
+    ).to(device)
 
     iLQR_planner = iLQR(
         dynamics_model,
