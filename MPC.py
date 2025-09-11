@@ -9,13 +9,12 @@ import matplotlib.pyplot as plt
 from collections import deque
 import itertools
 
-class Dataset:
-    def __init__(self, goal_state, state_size, action_size, env, update_interval, dataset_length, random_rollouts, seed, device):
+class DataSet:
+    def __init__(self, goal_state, state_size, action_size, env, update_interval, dataset_length, seed, device):
         self.seed = seed
         self.goal_state = goal_state
         self.state_size = state_size
         self.action_size = action_size
-        self.random_rollouts = random_rollouts
         self.update_interval = update_interval
         self.env = env
         self.rewards = deque(max_len=dataset_length)
@@ -30,9 +29,9 @@ class Dataset:
         action = self.env.action_space.sample()
         return action
 
-    def random_rollout(self):
+    def random_rollout(self, random_rollouts):
         state, _ = self.env.reset(seed=self.seed)
-        for t in range(self.random_rollouts):
+        for t in range(random_rollouts):
             action = self.random_policy()
             state_, reward, terminated, truncated, _ = self.env.step(action)
             self.add_sample(
@@ -87,23 +86,31 @@ class Dataset:
 
             yield rb, sb, nsb, ab
 
-    def train_dynamics_and_reward(self, dynamics_model, reward_model, dyn_optimiser, rew_optimiser, batch_size):
-        dyn_loss_total = 0.0
-        rew_loss_total = 0.0
-        for reward_batch, state_batch, next_state_batch, action_batch in self.batch_samples(batch_size):
-            batch_dyn_loss = torch.mean((dynamics_model.next_state(state_batch, action_batch) - next_state_batch).pow(2))
-            batch_rew_loss = torch.mean((reward_model(state_batch, action_batch) - reward_batch).pow(2))
+    def train_dynamics_and_reward(self, epochs, dynamics_model, reward_model, dyn_optimiser, rew_optimiser, batch_size):
+        dyn_loss_total = []
+        rew_loss_total = []
+        for epoch in epochs:
+            epoch_loss_dyn = 0.0
+            epoch_loss_rew = 0.0
+            batch_count = 0
+            for reward_batch, state_batch, next_state_batch, action_batch in self.batch_samples(batch_size):
+                batch_count += 1
+                batch_dyn_loss = torch.mean((dynamics_model.next_state(state_batch, action_batch) - next_state_batch).pow(2))
+                batch_rew_loss = torch.mean((reward_model(state_batch, action_batch) - reward_batch).pow(2))
 
-            dyn_optimiser.zero_grad()
-            batch_dyn_loss.backward()
-            dyn_optimiser.step()
+                dyn_optimiser.zero_grad()
+                batch_dyn_loss.backward()
+                dyn_optimiser.step()
 
-            rew_optimiser.zero_grad()
-            batch_rew_loss.backward()
-            rew_optimiser.step()
+                rew_optimiser.zero_grad()
+                batch_rew_loss.backward()
+                rew_optimiser.step()
 
-            dyn_loss_total += batch_dyn_loss
-            rew_loss_total += batch_rew_loss
+                epoch_loss_dyn += batch_dyn_loss
+                epoch_loss_rew += batch_rew_loss
+
+            dyn_loss_total.append(epoch_loss_dyn / batch_count)
+            rew_loss_total.append(epoch_loss_rew / batch_count)
 
         return dyn_loss_total, rew_loss_total
         
@@ -389,18 +396,54 @@ def main():
         device = 'cpu'
         print("cpu selected as device")
 
+    seed = 42
     env_id = 'LunarLanderContinuous-v3'
     env = gym.make(env_id)
 
-    data_set = DataSet()
+    horizon = 20
+    iLQR_iters = 50
+    update_interval = 5000
+    random_rollouts = 100000
+    dataset_length = 100000
+    hd1 = 128 ; hd2 = 64
+    hr1 = 128 ; hr2 = 64
+    epochs = 1000
 
-    dynamics_model = DynamicsModel()
-    reward_model = RewardModel()
+    goal_state = torch.tensor([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1, 1], device=device)
+    state_size = env.observation_space.shape[0]
+    action_size = env.action_space.shape[0]
 
-    iLQR_planner = iLQR()
+    data_set = DataSet(
+        goal_state, 
+        state_size, 
+        action_size, 
+        env, 
+        update_interval, 
+        dataset_length, 
+        random_rollouts, 
+        seed, 
+        device
+    )
+
+    dynamics_model = DynamicsModel(state_size, action_size, hd1, hd2)
+    reward_model = RewardModel(state_size, action_size, hr1, hr2)
+
+    iLQR_planner = iLQR(
+        dynamics_model,
+        reward_model,
+        state_size,
+        action_size,
+        iter_num=iLQR_iters,
+        device=device
+    )
     MPC_controller = MPC(
         planner=iLQR_planner,
+        planning_horizon=horizon
     )
+
+    for epoch in epochs:
+        data_set.random_rollout(random_rollouts)
+        data_set.train_dynamics_and_reward()
 
 
 
