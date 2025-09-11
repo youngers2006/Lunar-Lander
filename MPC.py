@@ -8,10 +8,66 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 
 class DataSet:
-    pass
+    def __init__(self, state_size, action_size, env, random_rollouts, seed, device):
+        self.seed = seed
+        self.state_size = state_size
+        self.action_size = action_size
+        self.random_rollouts = random_rollouts
+        self.env = env
+        self.rewards = torch.zeros(size=(random_rollouts, 1), dtype=torch.float32, device=device)
+        self.states = torch.zeros(size=(random_rollouts, state_size), dtype=torch.float32, device=device)
+        self.actions = torch.zeros(size=(random_rollouts, action_size), dtype=torch.float32, device=device)
+        self.next_states = torch.zeros(size=(random_rollouts, state_size), dtype=torch.float32, device=device)
+
+        self.sample_count = 0
+        self.device = device
+
+    def random_policy(self):
+        action = self.env.action_space.sample()
+        return action
+
+    def random_rollout(self):
+        state, _ = self.env.reset(seed=self.seed)
+        for t in range(self.random_rollouts):
+            action = self.random_policy()
+            state_, reward, terminated, truncated, _ = self.env.step(action)
+            self.rewards[t] = torch.tensor(reward, dtype=torch.float32, device=self.device) 
+            self.states[t] = torch.tensor(state, dtype=torch.float32, device=self.device) 
+            self.next_states[t] = torch.tensor(state_, dtype=torch.float32, device=self.device)  
+            self.actions[t] = torch.tensor(action, dtype=torch.float32, device=self.device) 
+            state = state_
+            self.sample_count += 1
+            if (terminated or truncated):
+                state, _ = self.env.reset
+                terminated = False ; truncated = False
+
+    def rollout(self, policy):
+        state, _ = self.env.reset(seed=self.seed)
+        for t in range(self.random_rollouts):
+            action = policy() # need to finish this bit
+            state_, reward, terminated, truncated, _ = self.env.step(action)
+            self.add_sample(
+                reward, 
+                state, 
+                state_, 
+                action
+            )
+            state = state_
+            self.sample_count += 1
+            if (terminated or truncated):
+                state, _ = self.env.reset(seed=self.seed)
+                terminated = False ; truncated = False
+
+    def add_sample(self, reward, state, state_, action):
+        torch.cat([self.rewards, reward], axis=0)
+        torch.cat([self.states, state], axis=0)
+        torch.cat([self.next_states, state_], axis=0)
+        torch.cat([self.actions, action], axis=0)
+            
 
 class DynamicsModel:
     def __init__(self, state_size, action_size, hidden1_size, hidden2_size):
+        super().__init__()
         self.shared_net = nn.Sequential(
             nn.Linear(in_features=(state_size + action_size), out_features=hidden1_size),
              nn.SiLU(),
