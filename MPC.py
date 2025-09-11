@@ -17,10 +17,10 @@ class DataSet:
         self.action_size = action_size
         self.update_interval = update_interval
         self.env = env
-        self.rewards = deque(max_len=dataset_length)
-        self.states = deque(max_len=dataset_length)
-        self.actions = deque(max_len=dataset_length)
-        self.next_states = deque(max_len=dataset_length)
+        self.rewards = deque(maxlen=dataset_length)
+        self.states = deque(maxlen=dataset_length)
+        self.actions = deque(maxlen=dataset_length)
+        self.next_states = deque(maxlen=dataset_length)
 
         self.sample_count = 0
         self.device = device
@@ -73,16 +73,15 @@ class DataSet:
         total_length = len(self.rewards)
         for i in range(0, total_length, batch_size):
             stop_index = min(i + batch_size, total_length)
-            rew_batch = itertools.islice(self.rewards, i, stop_index)
-            state_batch = itertools.islice(self.states, i, stop_index)
-            next_state_batch = itertools.islice(self.next_states, i, stop_index)
-            action_batch = itertools.islice(self.actions, i, stop_index)
+            rew_batch = list(itertools.islice(self.rewards, i, stop_index))
+            state_batch = list(itertools.islice(self.states, i, stop_index))
+            next_state_batch = list(itertools.islice(self.next_states, i, stop_index))
+            action_batch = list(itertools.islice(self.actions, i, stop_index))
 
-            rb = torch.tensor(np.array(rew_batch), dtype=torch.float32, device=self.device)
+            rb = torch.tensor(rew_batch, dtype=torch.float32, device=self.device)
             sb = torch.tensor(np.array(state_batch), dtype=torch.float32, device=self.device)
             nsb = torch.tensor(np.array(next_state_batch), dtype=torch.float32, device=self.device)
             ab = torch.tensor(np.array(action_batch), dtype=torch.float32, device=self.device)
-
             yield rb, sb, nsb, ab
 
     def train_dynamics_and_reward(self, epochs, dynamics_model, reward_model, dyn_optimiser, rew_optimiser, batch_size):
@@ -397,7 +396,7 @@ def train():
     env_id = 'LunarLanderContinuous-v3'
     env = gym.make(env_id)
 
-    horizon = 20
+    horizon = 30
     iLQR_iters = 50
     update_interval = 5000
     random_rollouts = 100000
@@ -474,7 +473,7 @@ def train():
     MPC_controller.planning_algorithm.update_reward_and_dynamics_models(dynamics_model, reward_model)
     reward_test = test(MPC_controller)
     progress_tracker.append(reward_test)
-    for _ in range(training_rollouts):
+    for _ in tqdm(range(training_rollouts), leave=False):
         data_set.rollout(MPC_controller)
         data_set.train_dynamics_and_reward(
             epochs, 
