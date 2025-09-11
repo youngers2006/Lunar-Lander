@@ -347,6 +347,7 @@ class iLQR:
         return nominal_states, nominal_actions
     
     def plan(self, planning_horizon, state_I, goal_state):
+        state_I = torch.tensor(state_I, dtype=torch.float32, device=self.device)
         nominal_states, nominal_actions = self.initial_guess(state_I, planning_horizon)
         for i in range(self.num_iterations):
             F, f = self.linearise_dynamics(nominal_states, nominal_actions)
@@ -388,7 +389,7 @@ class MPC:
         actions = self.planning_algorithm.plan(self.horizon, state, goal_state)
         return actions[0]
             
-def main():
+def train():
     if torch.cuda.is_available():
         device = 'cuda'
         print("cuda selected as device")
@@ -405,9 +406,13 @@ def main():
     update_interval = 5000
     random_rollouts = 100000
     dataset_length = 100000
+    training_rollouts = 100
     hd1 = 128 ; hd2 = 64
     hr1 = 128 ; hr2 = 64
     epochs = 1000
+    batch_size = 100
+    learn_rate_rew = 0.001
+    learn_rate_dyn = 0.001
 
     goal_state = torch.tensor([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1, 1], device=device)
     state_size = env.observation_space.shape[0]
@@ -441,11 +446,78 @@ def main():
         planning_horizon=horizon
     )
 
-    for epoch in epochs:
-        data_set.random_rollout(random_rollouts)
-        data_set.train_dynamics_and_reward()
+    dynamics_optimiser = torch.optim.Adam(
+        dynamics_model.parameters(),
+        learn_rate_dyn
+    )
+    reward_optimiser = torch.optim.Adam(
+        reward_model.parameters(),
+        learn_rate_rew
+    )
 
+    progress_tracker = []
+    
+    data_set.random_rollout(random_rollouts)
+    data_set.train_dynamics_and_reward(
+        epochs, 
+        dynamics_model, 
+        reward_model, 
+        dynamics_optimiser, 
+        reward_optimiser, 
+        batch_size
+    )
+    MPC_controller.planning_algorithm.update_reward_and_dynamics_models(dynamics_model, reward_model)
+    reward_test = test(MPC_controller)
+    progress_tracker.append(reward_test)
+    for _ in range(training_rollouts):
+        data_set.rollout(MPC_controller)
+        data_set.train_dynamics_and_reward(
+            epochs, 
+            dynamics_model, 
+            reward_model, 
+            dynamics_optimiser, 
+            reward_optimiser, 
+            batch_size
+        )
+        MPC_controller.planning_algorithm.update_reward_and_dynamics_models(dynamics_model, reward_model)
+        reward_test = test(MPC_controller)
+        progress_tracker.append(reward_test)
 
+    return MPC_controller, progress_tracker
+
+def test(MPC_controller, **kwargs):
+    env_id = 'LunarLanderContinuous-v3'
+    test_env = gym.make(env_id, **kwargs)
+    test_runs = 10
+
+    def test_rollout(MPC, env, test_runs, seed=42):
+        goal_state = torch.tensor([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1, 1])
+        reward_list = []
+        for run in range(test_runs):
+            state, _ = env.reset(seed=seed)
+            terminated = False ; truncated = False
+            run_reward = 0.0
+            while not (terminated or truncated):
+                action = MPC.act(state, goal_state)
+                action = action.detach().cpu().numpy().flatten()
+                state_, reward, terminated, truncated, _ = env.step(action)
+                run_reward += reward
+                state = state_
+            reward_list.append(run_reward)
+        return reward_list
+    
+    rewards = test_rollout(MPC_controller, test_env, test_runs)
+    rewards = np.array(rewards)
+    mean_reward = np.mean(rewards)
+    return mean_reward
+            
+
+def main():
+    MPC_controller, rewards_over_training = train()
+    rewards_test = test(MPC_controller, render_mode='human')
+    plt.plot(rewards_test)
+    plt.plot(rewards_over_training)
+    plt.show()
 
 if __name__ == "__main__":
     print("running training")
