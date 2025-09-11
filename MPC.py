@@ -7,13 +7,15 @@ import math
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 from collections import deque
+import itertools
 
-class DataSet:
-    def __init__(self, state_size, action_size, env, dataset_length, random_rollouts, seed, device):
+class Dataset:
+    def __init__(self, state_size, action_size, env, update_interval, dataset_length, random_rollouts, seed, device):
         self.seed = seed
         self.state_size = state_size
         self.action_size = action_size
         self.random_rollouts = random_rollouts
+        self.update_interval = update_interval
         self.env = env
         self.rewards = deque(max_len=dataset_length)
         self.states = deque(max_len=dataset_length)
@@ -46,7 +48,7 @@ class DataSet:
 
     def rollout(self, policy):
         state, _ = self.env.reset(seed=self.seed)
-        for t in range(self.random_rollouts):
+        for t in range(self.update_interval):
             action = policy() # need to finish this bit
             state_, reward, terminated, truncated, _ = self.env.step(action)
             self.add_sample(
@@ -66,12 +68,41 @@ class DataSet:
         self.states.append(state)
         self.next_states.append(state_)
         self.actions.append(action)
+    
+    def batch_samples(self, batch_size):
+        total_length = len(self.rewards)
+        for i in range(0, total_length, batch_size):
+            stop_index = min(i + batch_size, total_length)
+            rew_batch = itertools.islice(self.rewards, i, stop_index)
+            state_batch = itertools.islice(self.states, i, stop_index)
+            next_state_batch = itertools.islice(self.next_states, i, stop_index)
+            action_batch = itertools.islice(self.actions, i, stop_index)
 
-    def train_dynamics_and_reward(dynamics_model, reward_model, dataset, dyn_optimiser, rew_optimiser, batch_size):
+            rb = torch.tensor(np.array(rew_batch), dtype=torch.float32, device=self.device)
+            sb = torch.tensor(np.array(state_batch), dtype=torch.float32, device=self.device)
+            nsb = torch.tensor(np.array(next_state_batch), dtype=torch.float32, device=self.device)
+            ab = torch.tensor(np.array(action_batch), dtype=torch.float32, device=self.device)
+
+            yield rb, sb, nsb, ab
+
+
+    def train_dynamics_and_reward(self, dynamics_model, reward_model, dyn_optimiser, rew_optimiser, batch_size):
         dyn_loss_total = 0.0
         rew_loss_total = 0.0
-        for batch in dataset.batch_samples():
-            p = 0
+        for reward_batch, state_batch, next_state_batch, action_batch in self.batch_samples(batch_size):
+            batch_dyn_loss = torch.mean((dynamics_model(state_batch, action_batch) - next_state_batch).pow(2))
+            batch_rew_loss = torch.mean((reward_model(state_batch, action_batch) - reward_batch).pow(2))
+
+            dyn_optimiser.zero_grad()
+            batch_dyn_loss.backward()
+            dyn_optimiser.step()
+
+            rew_optimiser.zero_grad()
+            batch_rew_loss.backward()
+            rew_optimiser.step()
+
+            dyn_loss_total += batch_dyn_loss
+            rew_loss_total += batch_rew_loss
 
         return dyn_loss_total, rew_loss_total
         
