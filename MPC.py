@@ -198,11 +198,9 @@ class iLQR:
         self.last_nominal_states = None
         self.last_nominal_actions = None
 
-    def increase_lambda(self, factor):
-        self.lambda_ *= factor
-
-    def decrease_lambda(self, factor):
-        self.lambda_ /= factor
+        self.compiled_backwards = torch.compile(self.backwards_pass)
+        self.compiled_cost_fn = torch.compile(self.cost_function)
+        self.compiled_cost_T_fn = torch.compile(self.terminal_cost_function)
 
     def update_reward_and_dynamics_models(self, dynamics, reward_fn):
         self.dynamics = dynamics.to(self.device)
@@ -218,16 +216,13 @@ class iLQR:
     
     def terminal_cost_function(self, state_T, goal_state):
         delta_state = state_T - goal_state
-        cost_T = delta_state.T @ self.Q_final @ delta_state
+        cost_T = (delta_state.T @ self.Q_final @ delta_state).squeeze()
         return cost_T
     
     def get_total_cost(self, states, actions, goal_state):
-        final_cost = self.terminal_cost_function(states[-1], goal_state)
-        running_cost = 0
-        planning_horizon = actions.shape[0]
-        for i in range(planning_horizon):
-            running_cost += self.cost_function(states[i], actions[i])
-
+        final_cost = self.compiled_cost_T_fn(states[-1], goal_state)
+        vectorised_cost = torch.vmap(func=self.compiled_cost_fn, in_dims=(0,0))
+        running_cost = torch.sum(vectorised_cost(states, actions))
         total_cost = running_cost + final_cost
         return total_cost
 
@@ -294,19 +289,14 @@ class iLQR:
             qu = qt[self.state_dim:]
             qx = qt[:self.state_dim]
 
-            damping = 0.0
-            inv_Quu = None
-            while True:
-                Quu_reg = Quu + self.lambda_ * Iu
-                try:
-                    L = torch.linalg.cholesky(Quu_reg)
-                    inv_Quu = torch.cholesky_inverse(L)
-                    break
-                except RuntimeError:
-                    damping = 2 * damping + 1e-6
-                    if damping > 1e6:
-                        inv_Quu = torch.linalg.pinv(Quu_reg)
-                        break
+            Quu = 0.5 * (Quu + Quu.T)
+            Quu_eigvals = torch.linalg.eigvalsh(Quu)
+            min_eig = torch.min(Quu_eigvals)
+            reg_needed = torch.clamp(-min_eig + 1e-6, min=0.0)
+            Quu_reg = Quu + reg_needed * Iu
+
+            L = torch.linalg.cholesky(Quu_reg)
+            inv_Quu = torch.cholesky_inverse(L)
 
             Kt = - inv_Quu @ Qux
             kt = - inv_Quu @ qu
@@ -376,7 +366,7 @@ class iLQR:
         for i in range(self.num_iterations):
             F, f = self.linearise_dynamics(nominal_states, nominal_actions)
             C, c, CT, cT = self.derivatives(nominal_states, nominal_actions, goal_state)
-            k_gains, K_gains = self.backwards_pass(
+            k_gains, K_gains = self.compiled_backwards(
                 planning_horizon, 
                 F, 
                 f, 
@@ -398,11 +388,9 @@ class iLQR:
                 nominal_states = new_states
                 nominal_actions = new_actions
                 prev_cost = new_cost
-                self.decrease_lambda(factor=1.5)
                 if improvement < self.early_stop_tol:
                     break
             else:
-                self.increase_lambda(factor=5.0)
                 if self.lambda_ > 1e6:
                     print(f"algorithm couldnt converge after iteration {i+1}.")
                     break
@@ -435,7 +423,7 @@ def train():
     horizon = 10
     iLQR_iters = 10
     update_interval = 5000
-    random_rollouts = 100000
+    random_rollouts = 2000
     dataset_length = 100000
     training_rollouts = 100
     hd1 = 128 ; hd2 = 64
@@ -498,7 +486,7 @@ def train():
 
     progress_tracker = []
     print("started random rollouts")
-    for _ in range(500):
+    for _ in range(5):
         data_set.random_rollout(random_rollouts)
         data_set.train_dynamics_and_reward(
         epochs, 
