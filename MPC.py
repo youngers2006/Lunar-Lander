@@ -139,7 +139,6 @@ class DynamicsModel(nn.Module):
             min=-10
         )
         sigma = torch.exp(log_sigma)
-
         return mu, sigma
     
     def next_state(self, state, action, deterministic=True):
@@ -165,7 +164,7 @@ class RewardModel(nn.Module):
             nn.SiLU(),
             nn.Linear(in_features=hidden2_size, out_features=1)
         )
-    
+
     def forward(self, state, action):
         x = torch.cat(
             tensors=[state, action],
@@ -201,6 +200,7 @@ class iLQR:
         self.compiled_backwards = torch.compile(self.backwards_pass)
         self.compiled_cost_fn = torch.compile(self.cost_function)
         self.compiled_cost_T_fn = torch.compile(self.terminal_cost_function)
+        self.compiled_forward_pass = torch.compile(self._forward_pass)
 
     def update_reward_and_dynamics_models(self, dynamics, reward_fn):
         self.dynamics = dynamics.to(self.device)
@@ -222,7 +222,7 @@ class iLQR:
     def get_total_cost(self, states, actions, goal_state):
         final_cost = self.compiled_cost_T_fn(states[-1], goal_state)
         vectorised_cost = torch.vmap(func=self.compiled_cost_fn, in_dims=(0,0))
-        running_cost = torch.sum(vectorised_cost(states, actions))
+        running_cost = torch.sum(vectorised_cost(states[0:-1], actions))
         total_cost = running_cost + final_cost
         return total_cost
 
@@ -310,22 +310,32 @@ class iLQR:
         return k_gains, K_gains
     
     def _forward_pass(self, planning_horizon, nominal_states, nominal_actions, k_gains, K_gains, goal_state):
-        alpha = 1.0
-        success = False
-        nominal_cost = self.get_total_cost(nominal_states, nominal_actions, goal_state)
-        for _ in range(5):
-            new_states = nominal_states.clone()
-            new_actions = nominal_actions.clone()
-            for t in range(planning_horizon):
-                dx = new_states[t] - nominal_states[t]
-                new_actions[t] = nominal_actions[t] + alpha * k_gains[t] + K_gains[t] @ dx
-                new_states[t+1] = self.dynamics.next_state(new_states[t], new_actions[t], deterministic=True)
-            new_cost = self.get_total_cost(new_states, new_actions, goal_state) 
-            if new_cost < nominal_cost:
-                success = True
-                return new_states, new_actions, success, new_cost
-            alpha *= 0.5
-        return nominal_states, nominal_actions, success, nominal_cost
+        alphas = torch.tensor([1.0, 0.5, 0.25, 0.125, 0.0625], device=self.device)
+        num_alphas = alphas.shape[0]
+
+        states_candidates = nominal_states.unsqueeze(0).repeat(num_alphas, 1, 1)  
+        actions_candidates = nominal_actions.unsqueeze(0).repeat(num_alphas, 1, 1)
+
+        for t in range(planning_horizon):
+            dx = states_candidates[:, t, :] - nominal_states[t]
+            actions_candidates[:, t, :] = nominal_actions[t] + alphas[:, None] * k_gains[t] + (K_gains[t] @ dx.unsqueeze(-1)).squeeze(-1)
+            states_candidates[:, t+1, :] = torch.vmap(lambda x,u: self.dynamics.next_state(x,u,deterministic=True), in_dims=(0,0))(
+                states_candidates[:, t, :], 
+                actions_candidates[:, t, :]
+            )
+        costs = torch.vmap(self.get_total_cost, in_dims=(0,0,None))(
+            states_candidates,
+            actions_candidates,
+            goal_state
+        )
+        
+        best_idx = torch.argmin(costs)
+        best_states = states_candidates[best_idx]
+        best_actions = actions_candidates[best_idx]
+        best_cost = costs[best_idx]
+        success = best_cost < self.get_total_cost(nominal_states, nominal_actions, goal_state)
+
+        return best_states, best_actions, success, best_cost
     
     def initial_guess(self, x0, planning_horizon, warm_start=None):
         if warm_start is not None:
@@ -375,7 +385,7 @@ class iLQR:
                 CT, 
                 cT
             )
-            new_states, new_actions, success, new_cost = self._forward_pass(
+            new_states, new_actions, success, new_cost = self.compiled_forward_pass(
                 planning_horizon, 
                 nominal_states, 
                 nominal_actions, 
