@@ -172,18 +172,40 @@ class RewardModel(nn.Module):
         )
         return self.reward_net(x)
 
-class CEM:
-    def __init__(self):
-        pass
+class CEM: 
+    def __init__(self, num_samples, horizon, iterations):
+        self.num_samples = num_samples
+        self.H = horizon
+        self.iters = iterations
 
     def sample_sequences(self):
-        pass
+        def sample_sequence():
+            pass
+        sequences = torch.vmap(sample_sequence, in_dims=())()
+        return sequences
 
-    def evaluate_sequences(self):
-        pass
+    def evaluate_sequences(self, sequences):
+        def evaluate_sequence(sequence):
+            pass
+
+        evaluations = torch.vmap(evaluate_sequence, in_dims=())(sequences)
+        return evaluations
+
+    def select_elites(self, evaluations):
+        elites = torch.argmax(evaluations, dim=0)
+        return elites
+    
+    def refit(self, elites):
+        return new_dist
 
     def plan(self):
-        pass
+        for _ in self.iters:
+            sequences = self.sample_sequences()
+            evals = self.evaluate_sequences(sequences)
+            elites = self.select_elites(evals)
+            new_dist = self.refit(elites)
+        action_sequence = new_dist.mean()
+        return action_sequence[0]
 
 class MPC:
     def __init__(self, planner: CEM, planning_horizon):
