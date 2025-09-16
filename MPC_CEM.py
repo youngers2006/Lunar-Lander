@@ -176,6 +176,12 @@ class CEM:
     def __init__(self):
         pass
 
+    def sample_sequences(self):
+        pass
+
+    def evaluate_sequences(self):
+        pass
+
     def plan(self):
         pass
 
