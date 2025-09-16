@@ -173,10 +173,11 @@ class RewardModel(nn.Module):
         return self.reward_net(x)
 
 class CEM: 
-    def __init__(self, num_samples, horizon, iterations):
+    def __init__(self, num_samples, horizon, iterations, num_elites):
         self.num_samples = num_samples
         self.H = horizon
         self.iters = iterations
+        self.N_
 
     def sample_sequences(self):
         def sample_sequence():
