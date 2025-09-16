@@ -47,7 +47,8 @@ class DataSet:
     def rollout(self, MPC):
         state, _ = self.env.reset(seed=self.seed)
         for _ in tqdm(range(self.update_interval), desc="rolling out MPC", leave=False):
-            action = MPC.act(state)
+            state_tensor = torch.tensor(state, dtype=torch.float32, device=self.device)
+            action = MPC.act(state_tensor)
             action = action.detach().cpu().numpy().flatten()
             state_, reward, terminated, truncated, _ = self.env.step(action)
             self.add_sample(
@@ -94,7 +95,7 @@ class DataSet:
             batch_count = 0
             for reward_batch, state_batch, next_state_batch, action_batch in tqdm(self.batch_samples(batch_size), desc=f'Updating models. In epoch {epoch} / {epochs}', leave=False):
                 batch_count += 1
-                batch_dyn_loss = torch.mean((dynamics_model.next_state(state_batch, action_batch) - next_state_batch).pow(2))
+                batch_dyn_loss = torch.mean((dynamics_model.next_state_det(state_batch, action_batch) - next_state_batch).pow(2))
                 batch_rew_loss = torch.mean((reward_model(state_batch, action_batch) - reward_batch).pow(2))
 
                 dyn_optimiser.zero_grad()
@@ -231,22 +232,23 @@ class CEM:
         samples = torch.clamp(samples, min=self.action_min, max=self.action_max)
         return samples
 
+    @torch.compile
     def evaluate_sequences(self, sequences, state_I):
-        N = sequences.shape[0]
-        s = state_I.unsqueeze(0).repeat(N, *([1] * (state_I.ndim)))
-        total_rewards = torch.zeros(N,1, dtype=torch.float32, device=self.device)
+        N, H, A = sequences.shape
+        S = state_I.shape[0]
+        s = state_I.expand(N, S)
+        total_rewards = torch.zeros(N, dtype=torch.float32, device=self.device)
 
-        for t in range(self.H):
+        for t in range(H):
             a = sequences[:, t, :]
             next_state = self.dynamics_fn.next_state_det(s,a)
-            reward = self.reward_fn.forward(s,a)
-            reward.view(N)
-            total_rewards = total_rewards + reward
+            reward = self.reward_fn(s,a).view(-1)
+            total_rewards += reward
             s = next_state
         return total_rewards
 
     def select_elites(self, sequences, evaluations):
-        idx = torch.topk(evaluations, self.N_elites, dim=0).indices
+        idx = torch.topk(evaluations.squeeze(-1), self.N_elites, dim=0).indices
         elites = sequences[idx]
         return elites
     
@@ -261,7 +263,7 @@ class CEM:
         return torch.zeros(self.action_dim, device=self.device)
 
     def warmstart_fill_var(self):
-        return self.init_var
+        return torch.ones_like(self.var[-1]) * self.init_var
     
     def warm_start_prep(self):
         self.mean = torch.roll(self.mean, shifts=-1, dims=0)
@@ -270,7 +272,8 @@ class CEM:
         self.var[-1] = self.warmstart_fill_var()
 
     def plan(self, state_I):
-        for _ in self.iters:
+        state_I = torch.tensor(state_I, dtype=torch.float32, device=self.device)
+        for _ in range(self.iters):
             sequences = self.sample_sequences()
             evals = self.evaluate_sequences(sequences, state_I)
             elites = self.select_elites(sequences, evals)
@@ -372,7 +375,7 @@ def train():
 
     progress_tracker = []
     print("started random rollouts")
-    for _ in range(10):
+    for _ in range(1):
         data_set.random_rollout(random_rollouts)
         data_set.train_dynamics_and_reward(
         epochs, 
@@ -382,7 +385,7 @@ def train():
         reward_optimiser, 
         batch_size
     )
-        MPC_controller.planning_algorithm.update_models(dynamics_model, reward_model)
+        MPC_controller.planning_algorithm.update_models(reward_model, dynamics_model)
     print("starting MPC rollouts")
     for _ in tqdm(range(training_rollouts), leave=False):
         data_set.rollout(MPC_controller)
@@ -394,7 +397,7 @@ def train():
             reward_optimiser, 
             batch_size
         )
-        MPC_controller.planning_algorithm.update_models(dynamics_model, reward_model)
+        MPC_controller.planning_algorithm.update_models(reward_model, dynamics_model)
         reward_test = test(MPC_controller)
         progress_tracker.append(reward_test)
 
