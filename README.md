@@ -1,0 +1,1 @@
+In this project I used three seperate RL methods to solve lunar lander continuous on openAI gymnasium, I used one model free method (Proximal Policy Optimisation), one fully model based method (MPC with iLQR solver on learned dynamics and reward models) and one model free method accelarated by model based learning.
