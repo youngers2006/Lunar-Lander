@@ -306,10 +306,10 @@ def train():
     CEM_elite_num = 50
     CEM_samples = 500
     alpha = 0.15
-    update_interval = 5000
+    update_interval = 10000
     random_rollouts = 200000
     dataset_length = 200000
-    training_rollouts = 40
+    training_rollouts = 50
     hd1 = 128 ; hd2 = 64
     hr1 = 128 ; hr2 = 64
     epochs = 10
@@ -406,14 +406,13 @@ def test(MPC_controller, **kwargs):
     test_runs = 3
 
     def test_rollout(MPC, env, test_runs, seed=42):
-        goal_state = torch.tensor([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1, 1])
         reward_list = []
         for run in range(test_runs):
             state, _ = env.reset(seed=seed)
             terminated = False ; truncated = False
             run_reward = 0.0
             while not (terminated or truncated):
-                action = MPC.act(state, goal_state)
+                action = MPC.act(state)
                 action = action.detach().cpu().numpy().flatten()
                 state_, reward, terminated, truncated, _ = env.step(action)
                 run_reward += reward
