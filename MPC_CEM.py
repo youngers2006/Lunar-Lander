@@ -316,8 +316,8 @@ def train():
     batch_size = 1000
     learn_rate_rew = 0.001
     learn_rate_dyn = 0.001
-    a_max = torch.tensor(env.action_space.high(), dtype=torch.float32, device=device)
-    a_min = torch.tensor(env.action_space.low(), dtype=torch.float32, device=device)
+    a_max = torch.tensor(env.action_space.high, dtype=torch.float32, device=device)
+    a_min = torch.tensor(env.action_space.low, dtype=torch.float32, device=device)
 
     state_size = env.observation_space.shape[0]
     action_size = env.action_space.shape[0]
