@@ -141,16 +141,19 @@ class DynamicsModel(nn.Module):
         sigma = torch.exp(log_sigma)
         return mu, sigma
     
-    def next_state(self, state, action, deterministic=True):
+    def next_state_det(self, state, action):
+        mu, _ = self.forward(state, action)
+        delta_state = mu
+        next_state_prediction = state + delta_state
+        return next_state_prediction
+    
+    def next_state_stochastic(self, state, action):
         mu, sigma = self.forward(state, action)
-        if deterministic:
-            delta_state = mu
-        else:
-            state_dist = torch.distributions.Normal(
+        state_dist = torch.distributions.Normal(
                 loc=mu, 
                 scale=sigma
             )
-            delta_state = state_dist.rsample()
+        delta_state = state_dist.rsample()
         next_state_prediction = state + delta_state
         return next_state_prediction
 
@@ -173,49 +176,117 @@ class RewardModel(nn.Module):
         return self.reward_net(x)
 
 class CEM: 
-    def __init__(self, num_samples, horizon, iterations, num_elites):
+    def __init__(
+            self, 
+            num_samples, 
+            horizon, 
+            iterations, 
+            num_elites, 
+            reward_fn: RewardModel, 
+            dynamics_fn: DynamicsModel, 
+            action_dim, 
+            init_mean=None, 
+            init_var=None, 
+            action_max=1.0, 
+            action_min=-1.0, 
+            device='cpu'
+        ):
         self.num_samples = num_samples
         self.H = horizon
         self.iters = iterations
-        self.N_
+        self.N_elites = num_elites
+        self.reward_fn = reward_fn
+        self.dynamics_fn = dynamics_fn
+        self.device = device
+        self.action_dim = action_dim
+        self.var_floor = float(1e-4)
+        self.action_max = action_max
+        self.action_min = action_min
+
+        if init_mean is None:
+            self.mean = torch.zeros(horizon, action_dim, dtype=torch.float32, device=device)
+        else:
+            self.mean = torch.tensor(init_mean, dtype=torch.float32, device=device)
+        
+        if init_var is None:
+            self.var = torch.full((horizon, action_dim), self.var_floor, dtype=torch.float32, device=device)
+            self.init_var = self.var_floor
+        else:
+            self.var = torch.tensor(init_var, dtype=torch.float32, device=device)
+            self.init_var = torch.clamp(init_var, min=self.var_floor)
+
+    def update_models(self, reward_fn, dyn_fn):
+        self.dynamics_fn = dyn_fn
+        self.reward_fn = reward_fn
+
+    def reset_mean(self):
+        self.mean = torch.zeros_like(self.mean)
 
     def sample_sequences(self):
-        def sample_sequence():
-            pass
-        sequences = torch.vmap(sample_sequence, in_dims=())()
-        return sequences
+        std = torch.sqrt(self.var.clamp(min=self.var_floor))
+        z = torch.randn(self.num_samples, self.H, self.action_dim, device=self.device)
+        samples = self.mean.unsqueeze(0) + z * std.unsqueeze(0)
+        samples = torch.clamp(samples, min=self.action_min, max=self.action_max)
+        return samples
 
-    def evaluate_sequences(self, sequences):
-        def evaluate_sequence(sequence):
-            pass
+    def evaluate_sequences(self, sequences, state_I):
+        N = sequences.shape[0]
+        s = state_I.unsqueeze(0).repeat(N, *([1] * (state_I.ndim)))
+        total_rewards = torch.zeros(N,1, dtype=torch.float32, device=self.device)
 
-        evaluations = torch.vmap(evaluate_sequence, in_dims=())(sequences)
-        return evaluations
+        for t in range(self.H):
+            a = sequences[:, t, :]
+            next_state = self.dynamics_fn.next_state_det(s,a)
+            reward = self.reward_fn.forward(s,a)
+            reward.view(N)
+            total_rewards = total_rewards + reward
+            s = next_state
 
-    def select_elites(self, evaluations):
-        elites = torch.argmax(evaluations, dim=0)
+        return total_rewards
+
+    def select_elites(self, sequences, evaluations):
+        idx = torch.topk(evaluations, self.N_elites, dim=0).indices
+        elites = sequences[idx]
         return elites
     
     def refit(self, elites):
-        return new_dist
+        elite_mean = torch.mean(elites, dim=0)
+        elite_var = torch.var(elites, dim=0, unbiased=False)
+        new_mean = self.alpha * self.mean + (1.0 - self.alpha) * elite_mean
+        new_var = torch.clamp(elite_var, min=self.var_floor)
+        return new_mean, new_var
+    
+    def warmstart_fill_mean(self):
+        return torch.zeros(self.action_dim, device=self.device)
 
-    def plan(self):
+    def warmstart_fill_var(self):
+        return self.init_var
+    
+    def warm_start_prep(self):
+        self.mean = torch.roll(self.mean, shifts=-1, dims=0)
+        self.mean[-1] = self.warmstart_fill_mean()
+        self.var = torch.roll(self.var, shifts=-1, dims=0)
+        self.var[-1] = self.warmstart_fill_var()
+
+    def plan(self, state_I):
         for _ in self.iters:
             sequences = self.sample_sequences()
-            evals = self.evaluate_sequences(sequences)
-            elites = self.select_elites(evals)
-            new_dist = self.refit(elites)
-        action_sequence = new_dist.mean()
-        return action_sequence[0]
+            evals = self.evaluate_sequences(sequences, state_I)
+            elites = self.select_elites(sequences, evals)
+            new_mean, new_var = self.refit(elites)
+            self.mean = new_mean
+            self.var = new_var
+        best_action = self.mean[0].detach().clone()
+        self.warm_start_prep()
+        return best_action
 
 class MPC:
     def __init__(self, planner: CEM, planning_horizon):
         self.planning_algorithm = planner
         self.horizon = planning_horizon
 
-    def act(self, state, goal_state):
-        goal_state = torch.as_tensor(goal_state, dtype=torch.float32, device=self.planning_algorithm.device)
-        actions = self.planning_algorithm.plan(self.horizon, state, goal_state)
+    def act(self, state):
+        actions = self.planning_algorithm.plan(state)
         return actions[0]
             
 def train():
