@@ -10,9 +10,8 @@ from collections import deque
 import itertools
 
 class DataSet:
-    def __init__(self, goal_state, state_size, action_size, env, update_interval, dataset_length, seed, device):
+    def __init__(self, state_size, action_size, env, update_interval, dataset_length, seed, device):
         self.seed = seed
-        self.goal_state = goal_state
         self.state_size = state_size
         self.action_size = action_size
         self.update_interval = update_interval
@@ -48,7 +47,7 @@ class DataSet:
     def rollout(self, MPC):
         state, _ = self.env.reset(seed=self.seed)
         for _ in tqdm(range(self.update_interval), desc="rolling out MPC", leave=False):
-            action = MPC.act(state, self.goal_state)
+            action = MPC.act(state)
             action = action.detach().cpu().numpy().flatten()
             state_, reward, terminated, truncated, _ = self.env.step(action)
             self.add_sample(
@@ -185,6 +184,7 @@ class CEM:
             reward_fn: RewardModel, 
             dynamics_fn: DynamicsModel, 
             action_dim, 
+            alpha,
             init_mean=None, 
             init_var=None, 
             action_max=1.0, 
@@ -195,6 +195,7 @@ class CEM:
         self.H = horizon
         self.iters = iterations
         self.N_elites = num_elites
+        self.alpha = alpha
         self.reward_fn = reward_fn
         self.dynamics_fn = dynamics_fn
         self.device = device
@@ -219,8 +220,9 @@ class CEM:
         self.dynamics_fn = dyn_fn
         self.reward_fn = reward_fn
 
-    def reset_mean(self):
+    def reset_mean_and_var(self):
         self.mean = torch.zeros_like(self.mean)
+        self.var = torch.full_like(self.var, self.init_var)
 
     def sample_sequences(self):
         std = torch.sqrt(self.var.clamp(min=self.var_floor))
@@ -241,7 +243,6 @@ class CEM:
             reward.view(N)
             total_rewards = total_rewards + reward
             s = next_state
-
         return total_rewards
 
     def select_elites(self, sequences, evaluations):
@@ -276,14 +277,13 @@ class CEM:
             new_mean, new_var = self.refit(elites)
             self.mean = new_mean
             self.var = new_var
-        best_action = self.mean[0].detach().clone()
+        best_sequence = self.mean.detach().clone()
         self.warm_start_prep()
-        return best_action
+        return best_sequence
 
 class MPC:
-    def __init__(self, planner: CEM, planning_horizon):
+    def __init__(self, planner: CEM):
         self.planning_algorithm = planner
-        self.horizon = planning_horizon
 
     def act(self, state):
         actions = self.planning_algorithm.plan(state)
@@ -301,8 +301,11 @@ def train():
     env_id = 'LunarLanderContinuous-v3'
     env = gym.make(env_id)
 
-    horizon = 10
-    iLQR_iters = 10
+    horizon = 25
+    CEM_iters = 3
+    CEM_elite_num = 50
+    CEM_samples = 500
+    alpha = 0.15
     update_interval = 5000
     random_rollouts = 200000
     dataset_length = 200000
@@ -313,14 +316,13 @@ def train():
     batch_size = 1000
     learn_rate_rew = 0.001
     learn_rate_dyn = 0.001
-    variance_weight = 0.1
+    a_max = torch.tensor(env.action_space.high(), dtype=torch.float32, device=device)
+    a_min = torch.tensor(env.action_space.low(), dtype=torch.float32, device=device)
 
-    goal_state = torch.tensor([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1, 1], dtype=torch.float32, device=device)
     state_size = env.observation_space.shape[0]
     action_size = env.action_space.shape[0]
 
     data_set = DataSet(
-        goal_state, 
         state_size, 
         action_size, 
         env, 
@@ -342,18 +344,21 @@ def train():
         hr2
     ).to(device)
 
-    iLQR_planner = CEM(
-        dynamics_model,
-        reward_model,
-        state_size,
-        action_size,
-        variance_weight=variance_weight,
-        iter_num=iLQR_iters,
+    CEM_planner = CEM(
+        num_samples=CEM_samples,
+        horizon=horizon,
+        iterations=CEM_iters,
+        num_elites=CEM_elite_num,
+        reward_fn=reward_model,
+        dynamics_fn=dynamics_model,
+        action_dim=action_size,
+        alpha=alpha,
+        action_max=a_max,
+        action_min=a_min,
         device=device
     )
     MPC_controller = MPC(
-        planner=iLQR_planner,
-        planning_horizon=horizon
+        planner=CEM_planner
     )
 
     dynamics_optimiser = torch.optim.Adam(
@@ -367,7 +372,7 @@ def train():
 
     progress_tracker = []
     print("started random rollouts")
-    for _ in range(50):
+    for _ in range(10):
         data_set.random_rollout(random_rollouts)
         data_set.train_dynamics_and_reward(
         epochs, 
@@ -377,7 +382,7 @@ def train():
         reward_optimiser, 
         batch_size
     )
-        MPC_controller.planning_algorithm.update_reward_and_dynamics_models(dynamics_model, reward_model)
+        MPC_controller.planning_algorithm.update_models(dynamics_model, reward_model)
     print("starting MPC rollouts")
     for _ in tqdm(range(training_rollouts), leave=False):
         data_set.rollout(MPC_controller)
@@ -389,7 +394,7 @@ def train():
             reward_optimiser, 
             batch_size
         )
-        MPC_controller.planning_algorithm.update_reward_and_dynamics_models(dynamics_model, reward_model)
+        MPC_controller.planning_algorithm.update_models(dynamics_model, reward_model)
         reward_test = test(MPC_controller)
         progress_tracker.append(reward_test)
 
