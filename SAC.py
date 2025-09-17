@@ -11,9 +11,10 @@ from collections import deque
 import itertools
 
 class Dataset:
-    def __init__(self, buffer_size, batch_size, Q1_optimiser, Q2_optimiser, actor_optimiser, tau, gamma, seed, device):
+    def __init__(self, buffer_size, batch_size, train_epochs, Q1_optimiser, Q2_optimiser, actor_optimiser, tau, gamma, seed, device):
         self.buffer = deque(maxlen=buffer_size)
         self.batch_size = batch_size
+        self.epochs = train_epochs
         self.gamma = gamma
         self.tau = tau
         self.seed = seed
@@ -93,19 +94,20 @@ class Dataset:
         return Q1, Q2, QT1, QT2, actor
 
     def update_networks(self, Q1, Q2, QT1, QT2, actor):
-        for state, action, reward, state_, done in self.batch_buffer():
-            Q1, Q2, QT1, QT2, actor = self.train_step(
-                Q1, 
-                Q2, 
-                QT1, 
-                QT2, 
-                actor, 
-                state, 
-                action, 
-                reward, 
-                state_, 
-                done
-            )
+        for epoch in range(self.epochs):
+            for state, action, reward, state_, done in tqdm(self.batch_buffer(), desc=f'Training Networks, in epoch {epoch}/{self.epochs}', leave=False):
+                Q1, Q2, QT1, QT2, actor = self.train_step(
+                    Q1, 
+                    Q2, 
+                    QT1, 
+                    QT2, 
+                    actor, 
+                    state, 
+                    action, 
+                    reward, 
+                    state_, 
+                    done
+                )
         return Q1, Q2, QT1, QT2, actor
 
 class Q_Model(nn.Module):
@@ -157,12 +159,19 @@ class Actor:
 
 def train():
 
+    dataset = Dataset()
     Q_net_1 = Q_Model()
     Q_net_2 = Q_Model()
     target_Q1 = Q_Model()
     target_Q2 = Q_Model()
-
     actor = Actor()
+
+    for iteration in range(iters):
+        dataset.rollout()
+        dataset.update_networks()
+
+
+
 
     
 
