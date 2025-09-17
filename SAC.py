@@ -11,12 +11,17 @@ from collections import deque
 import itertools
 
 class Dataset:
-    def __init__(self, buffer_size, batch_size, gamma, seed):
+    def __init__(self, buffer_size, batch_size, Q1_optimiser, Q2_optimiser, actor_optimiser, tau, gamma, seed, device):
         self.buffer = deque(maxlen=buffer_size)
         self.batch_size = batch_size
         self.gamma = gamma
+        self.tau = tau
         self.seed = seed
         self.sample_count = 0
+        self.opt_Q1 = Q1_optimiser
+        self.opt_Q2 = Q2_optimiser
+        self.opt_actor = actor_optimiser
+        self.device = device
 
     def rollout(self, num_rollouts, env, actor):
         state, _ = env.reset(seed=self.seed)
@@ -45,24 +50,48 @@ class Dataset:
             db = torch.tensor(np.array(batch[4]), dtype=torch.float32, device=self.device)
             yield sb, ab, rb, nsb, db
 
+    def soft_update(self, target, main):
+        with torch.no_grad():
+            for target_param, main_param in zip(target.parameters(), main.parameters()):
+                target_param.data.copy_(
+                    self.tau * main_param.data + (1.0 - self.tau) * target_param.data
+                )
+        return target
+
     def update_networks(self, Q1, Q2, QT1, QT2, actor):
         for state, action, reward, state_, done in self.batch_buffer():
             Q_pred1 = Q1.forward(state, action)
             Q_pred2 = Q2.forward(state, action)
-            action_, log_prob = actor(state_)
+            action_, log_prob_ = actor(state_)
             Q_pred_targ1 = QT1.forward(state_, action_)
             Q_pred_targ2 = QT2.forward(state_, action_)
-            y = reward + self.gamma * (1 - done) * (torch.min([Q_pred_targ1, Q_pred_targ2], dim=0) - self.alpha * log_prob)
+            Q_tensor_targ = torch.tensor([Q_pred_targ1, Q_pred_targ2], dtype=torch.float32, device=self.device)
+            min_Q_targ = torch.min(Q_tensor_targ, dim=-1)
+            y = reward + self.gamma * (1 - done) * (min_Q_targ - self.alpha * log_prob_)
             loss_Q_1 = (1 / self.batch_size) * torch.sum(torch.square(Q_pred1 - y))
             loss_Q_2 = (1 / self.batch_size) * torch.sum(torch.square(Q_pred2 - y))
+            action_pred, log_prob = actor(state)
+            Q_pred_1_1 = Q1.forward(state, action_pred)
+            Q_pred_2_1 = Q1.forward(state, action_pred)
+            Q_tensor = torch.tensor([Q_pred_1_1, Q_pred_2_1], dtype=torch.float32, device=self.device)
+            min_Q = torch.min(Q_tensor, dim=-1)
+            loss_actor = (1 / self.batch_size) * torch.sum(min_Q - self.alpha * log_prob)
 
-            self.optimiser_Q1.zero_grad()
-            loss_Q_1.backwards()
-            self.optimiser_Q1.step()
+            self.opt_Q1.zero_grad()
+            loss_actor.backwards()
+            self.opt_Q1.step()
 
-            self.optimiser_Q2.zero_grad()
-            loss_Q_2.backwards()
-            self.optimiser_Q2.step()
+            self.opt_Q2.zero_grad()
+            loss_actor.backwards()
+            self.opt_Q2.step()
+
+            self.opt_actor.zero_grad()
+            loss_actor.backwards()
+            self.opt_actor.step()
+
+            QT1 = self.soft_update(QT1, Q1)
+            QT2 = self.soft_update(QT2, Q2)
+        return Q1, Q2, QT1, QT2, actor
 
 class Q_Model(nn.Module):
     def __init__(self, state_size, action_size, hidden_size_1, hidden_size_2):
