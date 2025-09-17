@@ -186,6 +186,22 @@ class Actor:
         z = mu + sigma * ep
         return nn.Tanh(z), log_prob
 
+def test(test_env, actor: Actor, tests, device):
+    rewards = []
+    for _ in tqdm(range(tests), desc='Testing Policy', leave=False):
+        state, _ = test_env.reset(seed=50)
+        done = False
+        ep_reward = 0
+        while not done:
+            action, _ = actor.act(state)
+            state_, reward, terminated, truncated, _ = test_env.step(action)
+            done = (terminated or truncated)
+            state = state_
+            ep_reward += reward
+        rewards.append(ep_reward)
+    reward_tensor = torch.tensor(rewards, dtype=torch.float32, device=device)
+    return torch.mean(reward_tensor)
+
 def train():
     dataset = Dataset()
     Q_net_1 = Q_Model()
@@ -195,6 +211,12 @@ def train():
     actor = Actor()
 
     for iteration in range(iters):
-        dataset.rollout()
-        dataset.update_networks()  
-        test()     
+        dataset.rollout(update_interval, env, actor)
+        Q_net_1, Q_net_2, target_Q1, target_Q2, actor = dataset.update_networks(
+            Q_net_1, 
+            Q_net_2, 
+            target_Q1, 
+            target_Q2, 
+            actor
+        )  
+        reward = test(test_env)     
