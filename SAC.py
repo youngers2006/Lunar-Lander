@@ -10,6 +10,34 @@ import matplotlib.pyplot as plt
 from collections import deque
 import itertools
 
+class StateNorm:
+    def __init__(self, state_size):
+        self.mean = torch.zeros(size=state_size)
+        self.variance = torch.zeros(size=state_size)
+        self.count = 1e-4
+        self.ready = True
+
+    def update(self, state_batch):
+        if self.ready:
+            batch_mean = torch.mean(state_batch, dim=0)
+            batch_var = torch.var(state_batch, dim=0)
+            batch_count = state_batch.shape[0]
+            self.update_from_moments(batch_mean, batch_var, batch_count)
+
+    def update_from_moments(self, mean, var, count):
+        delta = mean - self.mean
+        self.count += count
+        new_mean = self.mean + delta * count / self.count
+        m_a = self.var * self.count
+        m_b = var * count
+        new_var = (m_a + m_b + delta ** 2 * self.count * count / self.count) / self.count
+        self.mean = new_mean
+        self.var = new_var
+
+    def normalise(self, states):
+        states_norm = (states - self.mean) / (torch.sqrt(self.var) + 1e-8)
+        return states_norm
+
 class Dataset:
     def __init__(self, buffer_size, batch_size, train_epochs, Q1_optimiser, Q2_optimiser, actor_optimiser, tau, gamma, seed, device):
         self.buffer = deque(maxlen=buffer_size)
@@ -27,7 +55,8 @@ class Dataset:
     def rollout(self, num_rollouts, env, actor):
         state, _ = env.reset(seed=self.seed)
         for i in tqdm(range(num_rollouts), desc=f'Running Rollouts', leave=False):
-            action, _ = actor.act(state)
+            state_tensor = torch.tensor(state, dtype=torch.float32, device=self.device)
+            action, _ = actor.act(state_tensor)
             state_, reward, terminated, truncated, _ = env.step(action)
             done = (terminated or truncated)
             self.buffer.append((state, action, reward, state_, done))
@@ -158,7 +187,6 @@ class Actor:
         return nn.Tanh(z), log_prob
 
 def train():
-
     dataset = Dataset()
     Q_net_1 = Q_Model()
     Q_net_2 = Q_Model()
@@ -168,11 +196,5 @@ def train():
 
     for iteration in range(iters):
         dataset.rollout()
-        dataset.update_networks()
-
-
-
-
-    
-
-        
+        dataset.update_networks()  
+        test()     
