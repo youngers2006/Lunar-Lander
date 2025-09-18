@@ -375,7 +375,7 @@ def train():
 
     progress_tracker = []
     print("started random rollouts")
-    for _ in range(1):
+    for _ in range(10):
         data_set.random_rollout(random_rollouts)
         data_set.train_dynamics_and_reward(
         epochs, 
